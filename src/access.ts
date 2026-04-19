@@ -1,5 +1,5 @@
-import { readFileSync, writeFileSync, renameSync, mkdirSync, chmodSync } from 'node:fs'
-import { dirname } from 'node:path'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, chmodSync, readdirSync, rmSync } from 'node:fs'
+import { dirname, join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 
 export type GroupPolicy = {
@@ -180,4 +180,29 @@ export function gate(event: InboundEvent, access: Access, now: number, botOpenId
   }
 
   return { action: 'drop' }
+}
+
+// Outbound gate — reply/react/edit can only target chats the inbound gate
+// would deliver from. For P2P Feishu ties chat_id to the conversation with a
+// single user, so allowFrom covers DMs. Groups are accepted if they are in
+// the groups map (the operator has explicitly opted that group in).
+export function assertAllowedChat(access: Access, chatId: string): void {
+  if (access.allowFrom.includes(chatId)) return
+  if (chatId in access.groups) return
+  throw new Error(`chat ${chatId} is not allowlisted — add via /feishu:access`)
+}
+
+export function readApprovals(stateDir: string): string[] {
+  const dir = join(stateDir, 'approved')
+  try {
+    return readdirSync(dir)
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+    throw err
+  }
+}
+
+export function removeApproval(stateDir: string, openId: string): void {
+  const file = join(stateDir, 'approved', openId)
+  try { rmSync(file, { force: true }) } catch {}
 }
