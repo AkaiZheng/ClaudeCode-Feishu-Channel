@@ -171,6 +171,61 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
   }
 })
 
+// ---------------------------------------------------------------------------
+// Event ingress — WebSocket → gate → notification to Claude.
+// ---------------------------------------------------------------------------
+
+async function onEvent(event: InboundEvent): Promise<void> {
+  const access = readAccessFile(ACCESS_FILE)
+  // Pass undefined as botOpenId: the bot's own open_id resolution is a P1
+  // concern. The isMentioned() fallback treats any mention as sufficient in
+  // that case. Do NOT pass APP_ID here — it's `cli_xxx`, not an open_id.
+  const result = gate(event, access, Date.now(), undefined)
+
+  if (result.action === 'drop') return
+
+  if (result.action === 'pair') {
+    saveAccess(ACCESS_FILE, result.nextAccess)
+    const cmd = `/feishu:access pair ${result.code}`
+    const lead = result.isResend ? '仍在等待配对' : '需要配对'
+    const body = `${lead}｜pairing required\n\n在 Claude Code 终端里运行：\n${cmd}\n\n(Feishu bot — pairing code ${result.code})`
+    try {
+      await feishu.sendText(result.chatId, body)
+    } catch (err) {
+      process.stderr.write(`feishu channel: failed to send pairing prompt: ${err}\n`)
+    }
+    return
+  }
+
+  // deliver
+  const content = parsePost(event.message.message_type, event.message.content)
+  const chatType = event.message.chat_type === 'group' ? 'group' : 'p2p'
+  const ts = new Date(Number(event.message.create_time)).toISOString()
+
+  try {
+    await mcp.notification({
+      method: 'notifications/claude/channel',
+      params: {
+        content,
+        meta: {
+          chat_id: event.message.chat_id,
+          message_id: event.message.message_id,
+          user_id: event.sender.open_id,
+          user: event.sender.open_id,
+          chat_type: chatType,
+          ts,
+        },
+      },
+    })
+  } catch (err) {
+    process.stderr.write(`feishu channel: failed to forward inbound: ${err}\n`)
+  }
+}
+
+feishu.subscribe(onEvent, err => {
+  process.stderr.write(`feishu channel: ws error: ${err}\n`)
+})
+
 // Connect stdio last — Claude Code waits for the MCP handshake before
 // sending any tool calls, so prior work runs first.
 await mcp.connect(new StdioServerTransport())

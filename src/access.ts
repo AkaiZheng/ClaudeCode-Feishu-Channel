@@ -84,6 +84,7 @@ export type InboundEvent = {
     chat_id: string
     chat_type: 'p2p' | 'group' | string
     message_id: string
+    message_type: string          // added
     content: string
     create_time: string
     mentions: Array<{ key?: string; name?: string; id?: { open_id?: string; union_id?: string; user_id?: string } }>

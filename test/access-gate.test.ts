@@ -15,6 +15,7 @@ const ev = (over: Partial<{
     chat_id: over.chatId ?? 'oc_default',
     chat_type: over.chatType ?? 'p2p',
     message_id: 'om_1',
+    message_type: 'text',
     content: '{"text":"hi"}',
     create_time: String(over.createTime ?? now),
     mentions: over.mentioned ? [{ key: '@_user_1', name: 'feishu-bot', id: { open_id: 'ou_bot' } }] : [],
@@ -88,7 +89,7 @@ describe('gate — DM policies', () => {
     const a = defaultAccess()
     const event: InboundEvent = {
       sender: { open_id: '' },
-      message: { chat_id: 'oc_x', chat_type: 'p2p', message_id: 'om', content: '{}', create_time: '0', mentions: [] },
+      message: { chat_id: 'oc_x', chat_type: 'p2p', message_id: 'om', message_type: 'text', content: '{}', create_time: '0', mentions: [] },
     }
     expect(gate(event, a, now).action).toBe('drop')
   })
