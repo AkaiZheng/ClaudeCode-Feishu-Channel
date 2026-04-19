@@ -13,6 +13,7 @@ describe('defaultAccess', () => {
     const a = defaultAccess()
     expect(a.dmPolicy).toBe('pairing')
     expect(a.allowFrom).toEqual([])
+    expect(a.allowChats).toEqual([])
     expect(a.groups).toEqual({})
     expect(a.pending).toEqual({})
   })
@@ -74,10 +75,12 @@ describe('saveAccess', () => {
     const file = join(dir, 'access.json')
     const a = defaultAccess()
     a.allowFrom = ['ou_1', 'ou_2']
+    a.allowChats = ['oc_1', 'oc_2']
     a.dmPolicy = 'allowlist'
     saveAccess(file, a)
     const b = readAccessFile(file)
     expect(b.allowFrom).toEqual(['ou_1', 'ou_2'])
+    expect(b.allowChats).toEqual(['oc_1', 'oc_2'])
     expect(b.dmPolicy).toBe('allowlist')
   })
 })

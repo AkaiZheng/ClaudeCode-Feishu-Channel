@@ -219,6 +219,17 @@ async function onEvent(event: InboundEvent): Promise<void> {
     return
   }
 
+  // Opportunistic chat_id capture: if the sender is in allowFrom but we haven't
+  // recorded their P2P chat_id in allowChats yet (first inbound after Z-mode
+  // boot or /feishu:access allow), learn it now so the reply tool can target
+  // this chat.
+  if (event.message.chat_type === 'p2p'
+      && access.allowFrom.includes(event.sender.open_id)
+      && !access.allowChats.includes(event.message.chat_id)) {
+    access.allowChats.push(event.message.chat_id)
+    saveAccess(ACCESS_FILE, access)
+  }
+
   // deliver
   const content = parsePost(event.message.message_type, event.message.content)
   const chatType = event.message.chat_type === 'group' ? 'group' : 'p2p'
@@ -253,7 +264,7 @@ feishu.subscribe(onEvent, err => {
 const approvalsTimer = setInterval(async () => {
   for (const openId of readApprovals(STATE_DIR)) {
     try {
-      await feishu.sendText(openId, '已配对 ✅ — you can now talk to Claude.')
+      await feishu.sendText(openId, '已配对 ✅ — you can now talk to Claude.', 'open_id')
     } catch (err) {
       process.stderr.write(`feishu channel: approval confirm to ${openId} failed: ${err}\n`)
     } finally {

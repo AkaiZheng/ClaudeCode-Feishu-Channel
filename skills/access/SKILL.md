@@ -13,6 +13,7 @@ The state file is `~/.claude/channels/feishu/access.json` (mode 0o600). Its sche
 {
   "dmPolicy": "pairing | allowlist | disabled",
   "allowFrom": ["ou_xxx"],
+  "allowChats": ["oc_xxx"],
   "groups": { "oc_xxx": { "requireMention": true, "allowFrom": [] } },
   "pending": { "abc123": { "senderId": "ou_xxx", "chatId": "oc_xxx", "createdAt": 0, "expiresAt": 0, "replies": 1 } }
 }
@@ -26,7 +27,7 @@ Writes must be atomic: write to `access.json.tmp`, then `mv access.json.tmp acce
 
 1. Read `access.json`.
 2. Look up `pending[<code>]`. If missing or `expiresAt < now`, reply "code expired or invalid" and make no edits.
-3. Move `pending[<code>].senderId` into `allowFrom` (dedupe — do nothing if already present).
+3. Move `pending[<code>].senderId` into `allowFrom` and `pending[<code>].chatId` into `allowChats` (dedupe both — do nothing if already present).
 4. Delete `pending[<code>]`.
 5. Write back atomically (0o600).
 6. `mkdir -p ~/.claude/channels/feishu/approved` and `touch ~/.claude/channels/feishu/approved/<senderId>`.
@@ -34,6 +35,8 @@ Writes must be atomic: write to `access.json.tmp`, then `mv access.json.tmp acce
 ### `allow <open_id>`
 
 Directly add the given open_id to `allowFrom` (dedupe) and write back atomically. Also `touch approved/<open_id>` so the user gets a confirmation DM when they next interact. Useful for bootstrapping without pairing.
+
+Note: `allowChats` is NOT populated here — the server learns the chat_id opportunistically on the first inbound DM from this user.
 
 ### `revoke <open_id>`
 

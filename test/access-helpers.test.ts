@@ -5,19 +5,24 @@ import { join } from 'node:path'
 import { defaultAccess, assertAllowedChat, readApprovals, removeApproval } from '../src/access.ts'
 
 describe('assertAllowedChat', () => {
-  test('throws for non-allowlisted chat', () => {
+  test('throws for chat not in allowChats or groups', () => {
     expect(() => assertAllowedChat(defaultAccess(), 'oc_rando')).toThrow(/not allowlisted/)
   })
 
-  test('accepts allowlisted open_id (P2P chat_id == open_id semantics)', () => {
-    const a = defaultAccess(); a.allowFrom = ['oc_friend']
-    expect(() => assertAllowedChat(a, 'oc_friend')).not.toThrow()
+  test('accepts chat_id in allowChats', () => {
+    const a = defaultAccess(); a.allowChats = ['oc_peer']
+    expect(() => assertAllowedChat(a, 'oc_peer')).not.toThrow()
   })
 
   test('accepts group chat_id that is in groups map', () => {
     const a = defaultAccess()
     a.groups['oc_group'] = { requireMention: true, allowFrom: [] }
     expect(() => assertAllowedChat(a, 'oc_group')).not.toThrow()
+  })
+
+  test('open_id in allowFrom is NOT accepted as a chat_id by assertAllowedChat', () => {
+    const a = defaultAccess(); a.allowFrom = ['ou_peer']
+    expect(() => assertAllowedChat(a, 'ou_peer')).toThrow(/not allowlisted/)
   })
 })
 

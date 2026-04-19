@@ -18,6 +18,7 @@ export type PendingEntry = {
 export type Access = {
   dmPolicy: 'pairing' | 'allowlist' | 'disabled'
   allowFrom: string[]
+  allowChats: string[]
   groups: Record<string, GroupPolicy>
   pending: Record<string, PendingEntry>
   mentionPatterns?: string[]
@@ -30,6 +31,7 @@ export function defaultAccess(): Access {
   return {
     dmPolicy: 'pairing',
     allowFrom: [],
+    allowChats: [],
     groups: {},
     pending: {},
   }
@@ -48,6 +50,7 @@ export function readAccessFile(path: string): Access {
     return {
       dmPolicy: parsed.dmPolicy ?? 'pairing',
       allowFrom: parsed.allowFrom ?? [],
+      allowChats: parsed.allowChats ?? [],
       groups: parsed.groups ?? {},
       pending: parsed.pending ?? {},
       ...(parsed.mentionPatterns ? { mentionPatterns: parsed.mentionPatterns } : {}),
@@ -184,11 +187,12 @@ export function gate(event: InboundEvent, access: Access, now: number, botOpenId
 }
 
 // Outbound gate — reply/react/edit can only target chats the inbound gate
-// would deliver from. For P2P Feishu ties chat_id to the conversation with a
-// single user, so allowFrom covers DMs. Groups are accepted if they are in
-// the groups map (the operator has explicitly opted that group in).
+// would deliver from. P2P DMs are gated on allowChats (chat_ids, oc_xxx),
+// which is distinct from allowFrom (open_ids, ou_xxx) — Feishu never aliases
+// them. Groups are accepted if they are in the groups map (the operator has
+// explicitly opted that group in).
 export function assertAllowedChat(access: Access, chatId: string): void {
-  if (access.allowFrom.includes(chatId)) return
+  if (access.allowChats.includes(chatId)) return
   if (chatId in access.groups) return
   throw new Error(`chat ${chatId} is not allowlisted — add via /feishu:access`)
 }

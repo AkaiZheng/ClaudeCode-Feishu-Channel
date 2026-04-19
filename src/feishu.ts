@@ -142,11 +142,11 @@ export class FeishuClient {
     void this.wsClient.start({ eventDispatcher: dispatcher }).catch(err => onError?.(err))
   }
 
-  async sendText(chatId: string, text: string): Promise<string> {
+  async sendText(receiveId: string, text: string, receiveIdType: 'chat_id' | 'open_id' = 'chat_id'): Promise<string> {
     const res = await this.client.im.message.create({
-      params: { receive_id_type: 'chat_id' },
+      params: { receive_id_type: receiveIdType },
       data: {
-        receive_id: chatId,
+        receive_id: receiveId,
         msg_type: 'text',
         content: JSON.stringify({ text }),
       },
