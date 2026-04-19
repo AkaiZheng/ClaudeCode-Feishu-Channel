@@ -75,6 +75,28 @@ if (!APP_ID || !APP_SECRET) {
 // touches access.json or approved/.
 mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 })
 
+const PID_FILE = join(STATE_DIR, 'server.pid')
+try {
+  const stale = parseInt(readFileSync(PID_FILE, 'utf8'), 10)
+  if (stale > 1 && stale !== process.pid) {
+    try {
+      process.kill(stale, 0) // existence probe; throws ESRCH if dead
+      process.stderr.write(`feishu channel: replacing stale poller pid=${stale}\n`)
+      process.kill(stale, 'SIGTERM')
+    } catch {
+      // stale PID file — previous process already gone
+    }
+  }
+} catch {}
+writeFileSync(PID_FILE, String(process.pid))
+
+process.on('unhandledRejection', err => {
+  process.stderr.write(`feishu channel: unhandled rejection: ${err}\n`)
+})
+process.on('uncaughtException', err => {
+  process.stderr.write(`feishu channel: uncaught exception: ${err}\n`)
+})
+
 // First-boot: if access.json doesn't exist and we know the operator's open_id
 // from lark-cli, pre-populate allowFrom so the operator can self-chat with
 // zero configuration (Z mode from the design).
@@ -226,10 +248,55 @@ feishu.subscribe(onEvent, err => {
   process.stderr.write(`feishu channel: ws error: ${err}\n`)
 })
 
+// Poll approved/ for pairing confirmations written by /feishu:access pair.
+// Telegram does this every 5s; we match that cadence.
+const approvalsTimer = setInterval(async () => {
+  for (const openId of readApprovals(STATE_DIR)) {
+    try {
+      await feishu.sendText(openId, '已配对 ✅ — you can now talk to Claude.')
+    } catch (err) {
+      process.stderr.write(`feishu channel: approval confirm to ${openId} failed: ${err}\n`)
+    } finally {
+      removeApproval(STATE_DIR, openId)
+    }
+  }
+}, 5000)
+approvalsTimer.unref()
+
 // Connect stdio last — Claude Code waits for the MCP handshake before
 // sending any tool calls, so prior work runs first.
 await mcp.connect(new StdioServerTransport())
 
-// Tasks 11 and 12 will extend this file with the event subscription,
-// approvals polling, and PID lifecycle.
+// ---------------------------------------------------------------------------
+// Shutdown: clean up the PID file, then let the process exit.
+// ---------------------------------------------------------------------------
+let shuttingDown = false
+function shutdown(): void {
+  if (shuttingDown) return
+  shuttingDown = true
+  process.stderr.write('feishu channel: shutting down\n')
+  try {
+    if (parseInt(readFileSync(PID_FILE, 'utf8'), 10) === process.pid) rmSync(PID_FILE)
+  } catch {}
+  setTimeout(() => process.exit(0), 2000).unref()
+  void feishu.close().finally(() => process.exit(0))
+}
+process.stdin.on('end', shutdown)
+process.stdin.on('close', shutdown)
+process.on('SIGTERM', shutdown)
+process.on('SIGINT', shutdown)
+process.on('SIGHUP', shutdown)
+
+// Orphan watchdog — if our parent chain is severed (Claude Code crashed or
+// the shell that launched us went away), reparent detection + destroyed
+// stdin are the signals. Match Telegram's 5s cadence.
+const bootPpid = process.ppid
+setInterval(() => {
+  const orphaned =
+    (process.platform !== 'win32' && process.ppid !== bootPpid) ||
+    process.stdin.destroyed ||
+    process.stdin.readableEnded
+  if (orphaned) shutdown()
+}, 5000).unref()
+
 export { feishu, ACCESS_FILE, STATE_DIR, USER_OPEN_ID }
