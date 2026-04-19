@@ -112,7 +112,9 @@ function pruneExpired(a: Access, now: number): Access {
 function isMentioned(event: InboundEvent, botOpenId?: string, extraPatterns?: string[]): boolean {
   // Feishu puts explicit @-mentions in message.mentions. A mention of the bot
   // has id.open_id matching the bot's own open_id. When botOpenId is not known
-  // (e.g. during local dev or unit tests), any mention is treated as sufficient.
+  // (P0 shortcut: the bot's own open_id is resolved in P1), any mention is
+  // treated as sufficient. Callers must pass `undefined` when they don't have
+  // the bot's open_id — passing the app_id (`cli_xxx`) would never match.
   // We also accept user-supplied regex patterns against the content for workflows
   // like keyword-triggers.
   if (event.message.mentions.length > 0) {
