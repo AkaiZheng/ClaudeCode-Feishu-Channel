@@ -89,3 +89,88 @@ const UNSAFE_NAME = /[<>\[\]\r\n;]/g
 export function safeName(s: string | undefined): string | undefined {
   return s?.replace(UNSAFE_NAME, '_')
 }
+
+// ---------------------------------------------------------------------------
+// FeishuClient — SDK wrapper (WSClient for events, Client for REST)
+// ---------------------------------------------------------------------------
+
+import { Client, WSClient, EventDispatcher, LoggerLevel } from '@larksuiteoapi/node-sdk'
+import type { InboundEvent } from './access.ts'
+
+export type FeishuClientOpts = {
+  appId: string
+  appSecret: string
+  domain: string
+  loggerLevel?: LoggerLevel
+}
+
+export class FeishuClient {
+  private client: Client
+  private wsClient: WSClient
+  private wsRunning = false
+
+  constructor(private opts: FeishuClientOpts) {
+    this.client = new Client({
+      appId: opts.appId,
+      appSecret: opts.appSecret,
+      domain: opts.domain,
+      loggerLevel: opts.loggerLevel ?? LoggerLevel.error,
+    })
+    this.wsClient = new WSClient({
+      appId: opts.appId,
+      appSecret: opts.appSecret,
+      domain: opts.domain,
+      loggerLevel: opts.loggerLevel ?? LoggerLevel.error,
+    })
+  }
+
+  // Start the WebSocket loop. Returns once the connection is requested.
+  // Reconnects are handled by the SDK; we just log errors through onError.
+  subscribe(onEvent: (ev: InboundEvent) => Promise<void> | void, onError?: (e: unknown) => void): void {
+    if (this.wsRunning) return
+    this.wsRunning = true
+    const dispatcher = new EventDispatcher({}).register({
+      'im.message.receive_v1': async (data) => {
+        try {
+          await onEvent(data as unknown as InboundEvent)
+        } catch (err) {
+          onError?.(err)
+        }
+      },
+    })
+    // Fire and forget — SDK handles reconnection internally.
+    void this.wsClient.start({ eventDispatcher: dispatcher }).catch(err => onError?.(err))
+  }
+
+  async sendText(chatId: string, text: string): Promise<string> {
+    const res = await this.client.im.message.create({
+      params: { receive_id_type: 'chat_id' },
+      data: {
+        receive_id: chatId,
+        msg_type: 'text',
+        content: JSON.stringify({ text }),
+      },
+    })
+    const mid = res?.data?.message_id
+    if (!mid) throw new Error('sendText: Feishu API returned no message_id')
+    return mid
+  }
+
+  async replyText(messageId: string, text: string): Promise<string> {
+    const res = await this.client.im.message.reply({
+      path: { message_id: messageId },
+      data: {
+        msg_type: 'text',
+        content: JSON.stringify({ text }),
+      },
+    })
+    const mid = res?.data?.message_id
+    if (!mid) throw new Error('replyText: Feishu API returned no message_id')
+    return mid
+  }
+
+  async close(): Promise<void> {
+    this.wsRunning = false
+    this.wsClient.close()
+  }
+}
