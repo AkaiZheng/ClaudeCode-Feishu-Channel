@@ -169,6 +169,22 @@ export class FeishuClient {
     return mid
   }
 
+  async addReaction(messageId: string, emojiType: string): Promise<string> {
+    const res = await this.client.im.messageReaction.create({
+      path: { message_id: messageId },
+      data: { reaction_type: { emoji_type: emojiType } },
+    })
+    const rid = (res?.data as any)?.reaction_id
+    if (!rid) throw new Error('addReaction: no reaction_id returned')
+    return rid
+  }
+
+  async removeReaction(messageId: string, reactionId: string): Promise<void> {
+    await this.client.im.messageReaction.delete({
+      path: { message_id: messageId, reaction_id: reactionId },
+    })
+  }
+
   async close(): Promise<void> {
     this.wsRunning = false
     this.wsClient.close()

@@ -133,6 +133,11 @@ const mcp = new Server(
 // SDK client is constructed here; subscription happens in Task 11.
 const feishu = new FeishuClient({ appId: APP_ID, appSecret: APP_SECRET, domain: DOMAIN })
 
+// Typing indicator: add a reaction when processing, remove after reply.
+const TYPING_EMOJI = 'OnIt'
+// Map from chat_id to { messageId, reactionId } for active typing indicators.
+const activeReactions = new Map<string, { messageId: string; reactionId: string }>()
+
 // ---------------------------------------------------------------------------
 // Tool registry — P0 has only `reply`.
 // ---------------------------------------------------------------------------
@@ -186,6 +191,16 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       }
       sentIds.push(id)
     }
+
+    // Remove typing indicator after successful reply
+    const active = activeReactions.get(chatId)
+    if (active) {
+      activeReactions.delete(chatId)
+      feishu.removeReaction(active.messageId, active.reactionId).catch(err => {
+        process.stderr.write(`feishu channel: remove typing indicator failed: ${err}\n`)
+      })
+    }
+
     const label = sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
     return { content: [{ type: 'text', text: label }] }
   } catch (err) {
@@ -229,6 +244,18 @@ async function onEvent(event: InboundEvent): Promise<void> {
       && !access.allowChats.includes(event.message.chat_id)) {
     access.allowChats.push(event.message.chat_id)
     saveAccess(ACCESS_FILE, access)
+  }
+
+  // Typing indicator: add reaction to the incoming message
+  try {
+    const reactionId = await feishu.addReaction(event.message.message_id, TYPING_EMOJI)
+    activeReactions.set(event.message.chat_id, {
+      messageId: event.message.message_id,
+      reactionId,
+    })
+  } catch (err) {
+    // Non-fatal — the message will still be delivered without the indicator
+    process.stderr.write(`feishu channel: typing indicator failed: ${err}\n`)
   }
 
   // deliver
