@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { chunk, parsePost, safeName } from '../src/feishu.ts'
+import { chunk, parsePost, safeName, extractImageKeys } from '../src/feishu.ts'
 
 describe('chunk', () => {
   test('short text returns as single chunk', () => {
@@ -78,8 +78,12 @@ describe('parsePost', () => {
     expect(parsePost('post', content)).toContain('oops')
   })
 
-  test('image msg_type returns "(image)" placeholder', () => {
-    expect(parsePost('image', '{"image_key":"img_x"}')).toBe('(image)')
+  test('image msg_type returns "[image:key]" with image_key', () => {
+    expect(parsePost('image', '{"image_key":"img_x"}')).toBe('[image:img_x]')
+  })
+
+  test('image msg_type without key returns "(image)"', () => {
+    expect(parsePost('image', '{}')).toBe('(image)')
   })
 
   test('file msg_type returns "(file: name)" placeholder', () => {
@@ -93,6 +97,30 @@ describe('parsePost', () => {
 
   test('unknown msg_type returns "(<type>)"', () => {
     expect(parsePost('sticker', '{}')).toBe('(sticker)')
+  })
+})
+
+describe('extractImageKeys', () => {
+  test('extracts key from image message', () => {
+    expect(extractImageKeys('image', '{"image_key":"img_abc"}')).toEqual(['img_abc'])
+  })
+
+  test('extracts keys from post with img nodes', () => {
+    const post = JSON.stringify({
+      zh_cn: {
+        title: 'test',
+        content: [[{ tag: 'img', image_key: 'img_1' }], [{ tag: 'text', text: 'hi' }, { tag: 'img', image_key: 'img_2' }]],
+      },
+    })
+    expect(extractImageKeys('post', post)).toEqual(['img_1', 'img_2'])
+  })
+
+  test('returns empty for text message', () => {
+    expect(extractImageKeys('text', '{"text":"hello"}')).toEqual([])
+  })
+
+  test('returns empty for invalid JSON', () => {
+    expect(extractImageKeys('image', 'not json')).toEqual([])
   })
 })
 

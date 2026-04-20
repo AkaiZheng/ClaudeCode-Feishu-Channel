@@ -57,7 +57,10 @@ export function parsePost(msgType: string, rawContent: string): string {
     }
     return lines.filter(l => l.length > 0).join('\n\n')
   }
-  if (msgType === 'image') return '(image)'
+  if (msgType === 'image') {
+    const ik = (parsed as { image_key?: string } | null)?.image_key
+    return ik ? `[image:${ik}]` : '(image)'
+  }
   if (msgType === 'file') {
     const name = (parsed as { file_name?: string } | null)?.file_name
     return name ? `(file: ${name})` : '(file)'
@@ -85,6 +88,28 @@ function renderNode(node: PostNode): string {
   }
 }
 
+// Extract all image_key values from a message for downloading.
+export function extractImageKeys(msgType: string, rawContent: string): string[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(rawContent) } catch { return [] }
+  const keys: string[] = []
+  if (msgType === 'image') {
+    const ik = (parsed as { image_key?: string } | null)?.image_key
+    if (ik) keys.push(ik)
+  } else if (msgType === 'post') {
+    const payload = (parsed ?? {}) as PostPayload
+    const locale = payload.zh_cn ?? payload.en_us ?? Object.values(payload)[0]
+    if (locale) {
+      for (const para of locale.content ?? []) {
+        for (const node of para) {
+          if (node.tag === 'img' && node.image_key) keys.push(node.image_key as string)
+        }
+      }
+    }
+  }
+  return keys
+}
+
 const UNSAFE_NAME = /[<>\[\]\r\n;]/g
 export function safeName(s: string | undefined): string | undefined {
   return s?.replace(UNSAFE_NAME, '_')
@@ -94,6 +119,10 @@ export function safeName(s: string | undefined): string | undefined {
 // FeishuClient — SDK wrapper (WSClient for events, Client for REST)
 // ---------------------------------------------------------------------------
 
+import { execSync } from 'node:child_process'
+import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, basename, join } from 'node:path'
 import { Client, WSClient, EventDispatcher, LoggerLevel } from '@larksuiteoapi/node-sdk'
 import type { InboundEvent } from './access.ts'
 
@@ -166,6 +195,49 @@ export class FeishuClient {
     })
     const mid = res?.data?.message_id
     if (!mid) throw new Error('replyText: Feishu API returned no message_id')
+    return mid
+  }
+
+  // Download an image via lark-cli, returns { data: Buffer, mimeType: string }
+  downloadImage(messageId: string, imageKey: string): { data: Buffer; mimeType: string } {
+    const dir = join(tmpdir(), 'feishu-channel-dl')
+    mkdirSync(dir, { recursive: true })
+    const outFile = `dl-${Date.now()}.bin`
+    try {
+      execSync(
+        `lark-cli im +messages-resources-download --as bot --message-id ${messageId} --file-key ${imageKey} --type image --output ${outFile}`,
+        { cwd: dir, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] },
+      )
+    } catch (err) {
+      throw new Error(`downloadImage: lark-cli failed: ${err}`)
+    }
+    const filePath = join(dir, outFile)
+    const data = readFileSync(filePath)
+    try { unlinkSync(filePath) } catch {}
+    // Detect mime from magic bytes
+    const mimeType = data[0] === 0xFF && data[1] === 0xD8 ? 'image/jpeg' : 'image/png'
+    return { data, mimeType }
+  }
+
+  // Send an image via lark-cli (handles upload internally). lark-cli rejects
+  // absolute --image paths, so we cd into the file's directory and pass basename.
+  sendImage(chatId: string, imagePath: string): string {
+    const out = execSync(
+      `lark-cli im +messages-send --as bot --chat-id ${chatId} --image ${basename(imagePath)}`,
+      { encoding: 'utf8', timeout: 30000, cwd: dirname(imagePath) },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('sendImage: no message_id in lark-cli output')
+    return mid
+  }
+
+  replyImage(messageId: string, imagePath: string): string {
+    const out = execSync(
+      `lark-cli im +messages-reply --as bot --message-id ${messageId} --image ${basename(imagePath)}`,
+      { encoding: 'utf8', timeout: 30000, cwd: dirname(imagePath) },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('replyImage: no message_id in lark-cli output')
     return mid
   }
 

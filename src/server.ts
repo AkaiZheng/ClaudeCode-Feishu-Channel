@@ -2,8 +2,8 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
-import { readFileSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
-import { homedir } from 'node:os'
+import { readFileSync, mkdirSync, writeFileSync, rmSync, unlinkSync } from 'node:fs'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   loadDotEnv,
@@ -23,7 +23,7 @@ import {
   type Access,
   type InboundEvent,
 } from './access.ts'
-import { FeishuClient, chunk, parsePost } from './feishu.ts'
+import { FeishuClient, chunk, parsePost, extractImageKeys } from './feishu.ts'
 import { INSTRUCTIONS } from './instructions.ts'
 
 const HOME = homedir()
@@ -161,48 +161,104 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['chat_id', 'text'],
       },
     },
+    {
+      name: 'reply_image',
+      description:
+        'Send an image on Feishu. Provide base64-encoded image data (PNG/JPEG). The image will be uploaded to Feishu and sent to the chat. Optionally reply_to to thread under a message.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string', description: 'Target conversation ID (oc_xxx)' },
+          image_data: { type: 'string', description: 'Base64-encoded image data (supports data URI or raw base64)' },
+          reply_to: {
+            type: 'string',
+            description: 'message_id (om_xxx) to thread under. Omit for normal send.',
+          },
+        },
+        required: ['chat_id', 'image_data'],
+      },
+    },
   ],
 }))
 
+// Helper: clear typing indicator for a chat after reply
+function clearTypingIndicator(chatId: string): void {
+  const active = activeReactions.get(chatId)
+  if (active) {
+    activeReactions.delete(chatId)
+    feishu.removeReaction(active.messageId, active.reactionId).catch(err => {
+      process.stderr.write(`feishu channel: remove typing indicator failed: ${err}\n`)
+    })
+  }
+}
+
 mcp.setRequestHandler(CallToolRequestSchema, async req => {
   try {
-    if (req.params.name !== 'reply') {
-      return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
-    }
     const args = (req.params.arguments ?? {}) as Record<string, unknown>
-    const chatId = String(args.chat_id ?? '')
-    const text = String(args.text ?? '')
-    const replyTo = args.reply_to != null ? String(args.reply_to) : undefined
 
-    if (!chatId) throw new Error('reply: chat_id is required')
-    if (!text) throw new Error('reply: text is required')
+    if (req.params.name === 'reply') {
+      const chatId = String(args.chat_id ?? '')
+      const text = String(args.text ?? '')
+      const replyTo = args.reply_to != null ? String(args.reply_to) : undefined
 
-    assertAllowedChat(readAccessFile(ACCESS_FILE), chatId)
+      if (!chatId) throw new Error('reply: chat_id is required')
+      if (!text) throw new Error('reply: text is required')
 
-    const CHUNK_LIMIT = 5000
-    const chunks = chunk(text, CHUNK_LIMIT, 'newline')
-    const sentIds: string[] = []
-    for (const [i, piece] of chunks.entries()) {
-      let id: string
-      if (i === 0 && replyTo) {
-        id = await feishu.replyText(replyTo, piece)
-      } else {
-        id = await feishu.sendText(chatId, piece)
+      assertAllowedChat(readAccessFile(ACCESS_FILE), chatId)
+
+      const CHUNK_LIMIT = 5000
+      const chunks = chunk(text, CHUNK_LIMIT, 'newline')
+      const sentIds: string[] = []
+      for (const [i, piece] of chunks.entries()) {
+        let id: string
+        if (i === 0 && replyTo) {
+          id = await feishu.replyText(replyTo, piece)
+        } else {
+          id = await feishu.sendText(chatId, piece)
+        }
+        sentIds.push(id)
       }
-      sentIds.push(id)
+
+      clearTypingIndicator(chatId)
+
+      const label = sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
+      return { content: [{ type: 'text', text: label }] }
     }
 
-    // Remove typing indicator after successful reply
-    const active = activeReactions.get(chatId)
-    if (active) {
-      activeReactions.delete(chatId)
-      feishu.removeReaction(active.messageId, active.reactionId).catch(err => {
-        process.stderr.write(`feishu channel: remove typing indicator failed: ${err}\n`)
-      })
+    if (req.params.name === 'reply_image') {
+      const chatId = String(args.chat_id ?? '')
+      let imageData = String(args.image_data ?? '')
+      const replyTo = args.reply_to != null ? String(args.reply_to) : undefined
+
+      if (!chatId) throw new Error('reply_image: chat_id is required')
+      if (!imageData) throw new Error('reply_image: image_data is required')
+
+      assertAllowedChat(readAccessFile(ACCESS_FILE), chatId)
+
+      // Strip data URI prefix if present
+      const dataUriMatch = imageData.match(/^data:image\/\w+;base64,(.+)$/)
+      if (dataUriMatch) imageData = dataUriMatch[1]!
+
+      // Write to temp file for lark-cli
+      const tmp = join(tmpdir(), `feishu-send-${Date.now()}.png`)
+      writeFileSync(tmp, Buffer.from(imageData, 'base64'))
+
+      let mid: string
+      try {
+        if (replyTo) {
+          mid = feishu.replyImage(replyTo, tmp)
+        } else {
+          mid = feishu.sendImage(chatId, tmp)
+        }
+      } finally {
+        try { unlinkSync(tmp) } catch {}
+      }
+
+      clearTypingIndicator(chatId)
+      return { content: [{ type: 'text', text: `image sent (id: ${mid})` }] }
     }
 
-    const label = sentIds.length === 1 ? `sent (id: ${sentIds[0]})` : `sent ${sentIds.length} parts (ids: ${sentIds.join(', ')})`
-    return { content: [{ type: 'text', text: label }] }
+    return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return { content: [{ type: 'text', text: `reply failed: ${msg}` }], isError: true }
@@ -263,11 +319,33 @@ async function onEvent(event: InboundEvent): Promise<void> {
   const chatType = event.message.chat_type === 'group' ? 'group' : 'p2p'
   const ts = new Date(Number(event.message.create_time)).toISOString()
 
+  // Download images if present and build content parts
+  const imageKeys = extractImageKeys(event.message.message_type, event.message.content)
+  const imageParts: Array<{ data: string; mimeType: string }> = []
+  for (const ik of imageKeys) {
+    try {
+      const { data, mimeType } = feishu.downloadImage(event.message.message_id, ik)
+      imageParts.push({ data: data.toString('base64'), mimeType })
+    } catch (err) {
+      process.stderr.write(`feishu channel: image download failed (${ik}): ${err}\n`)
+    }
+  }
+
+  // Build notification content: text first, then images as data URIs
+  let fullContent = content
+  if (imageParts.length > 0) {
+    // Append image data URIs so Claude can see them
+    const imageUris = imageParts.map((p, i) =>
+      `\n[image ${i + 1}] data:${p.mimeType};base64,${p.data}`
+    ).join('')
+    fullContent = (content || '(image)') + imageUris
+  }
+
   try {
     await mcp.notification({
       method: 'notifications/claude/channel',
       params: {
-        content,
+        content: fullContent,
         meta: {
           chat_id: event.message.chat_id,
           message_id: event.message.message_id,
