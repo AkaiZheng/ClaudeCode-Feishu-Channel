@@ -36,7 +36,7 @@ console.error('smoke: subscribing for 30 s — send the bot a DM from Feishu…'
 feishu.subscribe(
   async event => {
     console.error(
-      `smoke: received from ${event.sender.open_id} in ${event.message.chat_id}: ${event.message.content}`,
+      `smoke: received from ${event.sender?.sender_id?.open_id} in ${event.message.chat_id}: ${event.message.content}`,
     )
     try {
       const mid = await feishu.sendText(event.message.chat_id, 'smoke ok')

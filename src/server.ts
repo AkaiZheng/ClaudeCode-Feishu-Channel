@@ -19,6 +19,7 @@ import {
   readApprovals,
   removeApproval,
   gate,
+  getSenderOpenId,
   type Access,
   type InboundEvent,
 } from './access.ts'
@@ -224,7 +225,7 @@ async function onEvent(event: InboundEvent): Promise<void> {
   // boot or /feishu:access allow), learn it now so the reply tool can target
   // this chat.
   if (event.message.chat_type === 'p2p'
-      && access.allowFrom.includes(event.sender.open_id)
+      && access.allowFrom.includes(getSenderOpenId(event) ?? '')
       && !access.allowChats.includes(event.message.chat_id)) {
     access.allowChats.push(event.message.chat_id)
     saveAccess(ACCESS_FILE, access)
@@ -243,8 +244,8 @@ async function onEvent(event: InboundEvent): Promise<void> {
         meta: {
           chat_id: event.message.chat_id,
           message_id: event.message.message_id,
-          user_id: event.sender.open_id,
-          user: event.sender.open_id,
+          user_id: getSenderOpenId(event),
+          user: getSenderOpenId(event),
           chat_type: chatType,
           ts,
         },

@@ -82,16 +82,25 @@ export function saveAccess(path: string, access: Access): void {
 // Appended to src/access.ts — keep existing exports.
 
 export type InboundEvent = {
-  sender: { open_id: string }
+  sender: {
+    sender_id: { open_id: string; union_id?: string; user_id?: string | null }
+    sender_type: string
+    tenant_key?: string
+  }
   message: {
     chat_id: string
     chat_type: 'p2p' | 'group' | string
     message_id: string
-    message_type: string          // added
+    message_type: string
     content: string
-    create_time: string
-    mentions: Array<{ key?: string; name?: string; id?: { open_id?: string; union_id?: string; user_id?: string } }>
+    create_time?: string
+    mentions?: Array<{ key?: string; name?: string; id?: { open_id?: string; union_id?: string; user_id?: string } }>
   }
+}
+
+/** Helper to get sender open_id from the nested event structure */
+export function getSenderOpenId(event: InboundEvent): string | undefined {
+  return event.sender?.sender_id?.open_id
 }
 
 export type GateResult =
@@ -121,7 +130,7 @@ function isMentioned(event: InboundEvent, botOpenId?: string, extraPatterns?: st
   // the bot's open_id — passing the app_id (`cli_xxx`) would never match.
   // We also accept user-supplied regex patterns against the content for workflows
   // like keyword-triggers.
-  if (event.message.mentions.length > 0) {
+  if (event.message.mentions && event.message.mentions.length > 0) {
     if (!botOpenId) return true
     for (const m of event.message.mentions) {
       if (m.id?.open_id === botOpenId) return true
@@ -142,7 +151,7 @@ function safeParseContent(raw: string): unknown {
 export function gate(event: InboundEvent, access: Access, now: number, botOpenId?: string): GateResult {
   const pruned = pruneExpired(access, now)
   if (pruned.dmPolicy === 'disabled') return { action: 'drop' }
-  const sender = event.sender.open_id
+  const sender = getSenderOpenId(event)
   if (!sender) return { action: 'drop' }
   const chatId = event.message.chat_id
   const chatType = event.message.chat_type
