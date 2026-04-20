@@ -10,7 +10,10 @@ const ev = (over: Partial<{
   mentioned: boolean
   createTime: number
 }> = {}): InboundEvent => ({
-  sender: { open_id: over.openId ?? 'ou_new' },
+  sender: {
+    sender_id: { open_id: over.openId ?? 'ou_new' },
+    sender_type: 'user',
+  },
   message: {
     chat_id: over.chatId ?? 'oc_default',
     chat_type: over.chatType ?? 'p2p',
@@ -88,7 +91,7 @@ describe('gate — DM policies', () => {
   test('missing sender open_id drops', () => {
     const a = defaultAccess()
     const event: InboundEvent = {
-      sender: { open_id: '' },
+      sender: { sender_id: { open_id: '' }, sender_type: 'user' },
       message: { chat_id: 'oc_x', chat_type: 'p2p', message_id: 'om', message_type: 'text', content: '{}', create_time: '0', mentions: [] },
     }
     expect(gate(event, a, now).action).toBe('drop')
