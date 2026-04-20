@@ -180,6 +180,8 @@ P0 default `msg_type="text"`. Markdown-to-post conversion is P1 (see §9).
 
 **Z-mode self-bootstrap**: on first boot, if `access.json` doesn't exist and `FEISHU_USER_OPEN_ID` is set (from `.env` or imported from lark-cli), `defaultAccess()` pre-populates `allowFrom=[userOpenId]`. The lark-cli-authenticated user talks to the bot without pairing.
 
+**Opportunistic chat_id capture**: Feishu open_ids (`ou_xxx`) and P2P chat_ids (`oc_xxx`) are distinct values — they never alias. `allowFrom` holds open_ids (for inbound gating) while `allowChats` holds chat_ids (for outbound gating via `assertAllowedChat`). Because Z-mode boot and `/feishu:access allow` only know the open_id, `allowChats` starts empty. On the first inbound P2P message from an `allowFrom` sender, `onEvent` detects the missing chat_id and appends it to `allowChats` before forwarding the message to Claude. This means the `reply` tool works from the very first response without any manual configuration step.
+
 **Why file-handshake**: the `/feishu:access` skill runs in a completely separate Claude Code execution from the long-lived server.ts subprocess. Shared mutable state (access.json) + a poll-for-confirmation file is the simplest IPC that doesn't require a socket or API. Matches Telegram.
 
 ## 7. Access control
@@ -189,7 +191,11 @@ P0 default `msg_type="text"`. Markdown-to-post conversion is P1 (see §9).
 ```ts
 type Access = {
   dmPolicy: 'pairing' | 'allowlist' | 'disabled'
-  allowFrom: string[]                   // open_ids allowed in DMs
+  allowFrom: string[]                   // open_ids (ou_xxx) allowed in DMs — inbound gate only
+  allowChats: string[]                  // chat_ids (oc_xxx) for approved P2P conversations — outbound gate
+                                        // Populated by: pair (from pending.chatId) and opportunistic
+                                        // capture in onEvent on first inbound from an allowFrom sender.
+                                        // NOT populated by /feishu:access allow — server learns it lazily.
   groups: Record<string, GroupPolicy>   // P1+, keyed by chat_id (oc_xxx)
   pending: Record<string, PendingEntry>
   mentionPatterns?: string[]            // P1+, extra regex patterns that count as @bot

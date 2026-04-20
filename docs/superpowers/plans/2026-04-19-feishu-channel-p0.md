@@ -1814,7 +1814,10 @@ Before that block, insert:
 
 async function onEvent(event: InboundEvent): Promise<void> {
   const access = readAccessFile(ACCESS_FILE)
-  const result = gate(event, access, Date.now(), APP_ID /* bot's own open_id resolution is a P1 concern */)
+  // Pass undefined as botOpenId: the bot's own open_id resolution is a P1
+  // concern. The isMentioned() fallback treats any mention as sufficient in
+  // that case. Do NOT pass APP_ID here — it's `cli_xxx`, not an open_id.
+  const result = gate(event, access, Date.now(), undefined)
 
   if (result.action === 'drop') return
 
