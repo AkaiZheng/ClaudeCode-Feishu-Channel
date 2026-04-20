@@ -1,109 +1,128 @@
 # Feishu Channel for Claude Code
 
-A [Claude Code channel](https://code.claude.com/docs/en/channels) that bridges Feishu (Lark) DMs into your running session. Send a message to your bot in Feishu; Claude reads it, does the work, and replies back through the same chat.
+在飞书里和 Claude Code 对话。发消息给 bot，Claude 读取、处理、回复——全在同一个聊天窗口里完成。
 
-Status: P0 — text DMs with pairing and zero-config self-allowlisting for the lark-cli-authenticated user.
+## 30 秒概述
 
-## Prerequisites
+```
+你 (飞书 DM) → bot → WebSocket → Claude Code → reply → 飞书回复
+```
 
-- [Bun](https://bun.sh) installed (`bun --version` must succeed)
-- A Feishu app with:
-  - 事件与回调 → "使用长连接接收事件"
-  - Subscribed event: `im.message.receive_v1`
-  - App scopes: `im:message:receive_as_bot`, `im:message:send_as_bot`
-  - 应用可见范围 including you
-  - A released version (创建版本 → approved)
-- (Optional but recommended) [lark-cli](https://github.com/larksuite/cli) installed and authenticated — the channel auto-imports your `appId`, `brand`, and `userOpenId`.
+## 快速开始
 
-## Install
+> **如果你在 Claude Code 里看到这个 README**：直接运行 `bun scripts/setup.ts`，脚本会自动引导你完成所有配置。只需在提示时打开浏览器链接即可。
+
+### 前置依赖
+
+- [Bun](https://bun.sh) — `curl -fsSL https://bun.sh/install | bash`
+- [lark-cli](https://github.com/larksuite/cli) — `npm install -g @larksuite/cli`
+
+### 安装
 
 ```bash
-# Option A — plugin install (once this plugin is on the Anthropic allowlist; P0 is development only)
-/plugin install feishu@claude-plugins-official      # not yet available
-
-# Option B — development install
-git clone <this repo> ~/claude-plugins/feishu
-cd ~/claude-plugins/feishu
+git clone https://github.com/AkaiZheng/ClaudeCode-Feishu-Channel.git
+cd ClaudeCode-Feishu-Channel
 bun install
 ```
 
-Then register it in your project's `.mcp.json` (or `~/.claude.json` for a user-wide install):
+### 自动配置（推荐）
 
-```json
-{
-  "mcpServers": {
-    "feishu": { "command": "bun", "args": ["/absolute/path/to/this/repo/src/server.ts"] }
-  }
-}
+```bash
+bun scripts/setup.ts
 ```
 
-## Configure
+脚本会：
+1. ✅ 检查环境（Bun, lark-cli）
+2. ✅ 检测/创建飞书应用 → 输出链接，你打开完成配置
+3. ✅ 检测/完成用户授权 → 输出链接，你打开完成授权
+4. ✅ 自动写入 `.env` 凭证
+5. ✅ 验证 WebSocket 事件订阅
+6. ✅ 输出启动命令
 
-Set `FEISHU_APP_ID` and `FEISHU_APP_SECRET` in `~/.claude/channels/feishu/.env` (mode 0o600):
-
-```
-FEISHU_APP_ID=cli_xxxxxx
-FEISHU_APP_SECRET=xxxxxxxxxxxxxxxx
-```
-
-If you have lark-cli installed, populate the non-secret fields automatically inside Claude Code:
-
-```
-/feishu:configure import
-```
-
-Then follow the prompt to set the secret:
-
-```
-/feishu:configure set FEISHU_APP_SECRET=<your secret>
-```
-
-Confirm connectivity:
-
-```
-/feishu:configure check
-```
-
-## Run
+### 启动
 
 ```bash
 claude --dangerously-load-development-channels server:feishu
 ```
 
-P0 is not yet on the official allowlist, so the development flag is required.
+然后在飞书给你的 bot 发一条消息，Claude Code 就能收到了。
 
-## First-time pairing
+## 手动配置
 
-**If you imported from lark-cli**: your own `open_id` is pre-allowlisted. DM the bot "hi" — it arrives in Claude.
+如果不想用 setup 脚本，手动步骤如下：
 
-**If someone else is the first sender**: the bot replies with a 6-char pairing code. In Claude Code, run:
+<details>
+<summary>展开手动配置步骤</summary>
 
+### 1. 飞书应用
+
+需要一个飞书应用，在[飞书开发者后台](https://open.feishu.cn)配置：
+
+- 事件与回调 → **使用长连接接收事件**
+- 订阅事件：`im.message.receive_v1`
+- 权限：`im:message:receive_as_bot`, `im:message:send_as_bot`, `im:message`
+- 应用可见范围包含你自己
+- 创建版本并发布
+
+或者用 lark-cli 一键创建：`lark-cli config init --new`
+
+### 2. 凭证配置
+
+```bash
+mkdir -p ~/.claude/channels/feishu
+cat > ~/.claude/channels/feishu/.env << 'EOF'
+FEISHU_APP_ID=cli_xxxxxx
+FEISHU_APP_SECRET=xxxxxxxxxxxxxxxx
+EOF
+chmod 600 ~/.claude/channels/feishu/.env
 ```
-/feishu:access pair <code>
+
+如果已有 lark-cli，channel 会自动从 `~/.lark-cli/config.json` 导入 appId 和 userOpenId。
+
+### 3. 启动
+
+```bash
+claude --dangerously-load-development-channels server:feishu
 ```
 
-See `skills/access/SKILL.md` for the full subcommand set (allow/revoke/list/policy/pending).
+</details>
 
-## Troubleshoot
+## 首次配对
 
-- **"FEISHU_APP_ID and FEISHU_APP_SECRET are required"** — you skipped `/feishu:configure set FEISHU_APP_SECRET=`.
-- **`/mcp` says "Failed to connect"** — check `~/.claude/debug/<session>.txt` for the stderr from `server.ts`.
-- **No events arrive** — confirm long-connection event subscription in the Feishu console, the `im.message.receive_v1` subscription, and that you're in the app's visibility range. Also stop any concurrent `lark-cli event +subscribe` for the same app (Feishu splits events across WebSocket consumers).
-- **"chat X is not allowlisted"** on outbound — Claude tried to reply to a chat that isn't in `allowFrom`. Run `/feishu:access list` to see current state.
+- **如果有 lark-cli**：你的 open_id 会自动加入白名单，直接给 bot 发消息即可。
+- **如果是其他用户**：bot 会回复一个 6 位配对码，在 Claude Code 里运行 `/feishu:access pair <code>` 完成配对。
 
-## Smoke test
+## Smoke Test
 
 ```bash
 bun scripts/smoke.ts
+# 30 秒内给 bot 发消息，会收到 "smoke ok" 回复
 ```
 
-Subscribes for 30 s; any DM you send the bot gets a "smoke ok" reply.
+## 安全
 
-## Security
+- 入站消息经 access gate 过滤后才到达 Claude
+- 出站回复限定为已允许的 chat，不会向陌生会话泄露
+- 凭证文件始终 `chmod 0o600`
+- 防 prompt injection 指令内置于 system prompt
 
-- Sender allowlist; prompt injection surface is gated before Claude ever sees the text.
-- Outbound targets gated by the same list — Claude cannot exfiltrate to arbitrary chats.
-- State-dir files are never attachable via future file-reply extensions (P1).
-- Credential files are `chmod 0o600` at all times.
+## 故障排查
 
-See [the design spec](docs/superpowers/specs/2026-04-19-feishu-channel-design.md) for full architecture.
+| 现象 | 解法 |
+|------|------|
+| 没收到消息 | 确认应用开了长连接事件订阅 + `im.message.receive_v1` |
+| "FEISHU_APP_SECRET required" | `.env` 没配 secret |
+| "chat X is not allowlisted" | 运行 `/feishu:access allow <open_id>` |
+| setup 脚本超时 | 用户没在 5 分钟内完成浏览器操作，重试即可 |
+
+## 开发
+
+```bash
+bun test          # 单测
+bun run typecheck # 类型检查
+bun scripts/smoke.ts  # 30s 连通性测试
+```
+
+## License
+
+MIT
