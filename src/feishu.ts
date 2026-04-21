@@ -32,6 +32,18 @@ type PostNode = {
 type PostLocale = { title?: string; content?: PostNode[][] }
 type PostPayload = Record<string, PostLocale>
 
+// Feishu post payloads come in two shapes:
+//   1. Flat locale — `{title, content}` directly (what the client usually sends)
+//   2. i18n-wrapped — `{zh_cn: {title, content}, en_us: {...}}`
+// Pick whichever the payload actually is so both branches see the locale.
+function resolvePostLocale(parsed: unknown): PostLocale | undefined {
+  if (!parsed || typeof parsed !== 'object') return undefined
+  const obj = parsed as Record<string, unknown>
+  if ('content' in obj || 'title' in obj) return obj as PostLocale
+  const payload = obj as PostPayload
+  return payload.zh_cn ?? payload.en_us ?? Object.values(payload)[0]
+}
+
 // Feishu message content arrives as a double-encoded JSON string. The outer
 // parse is always required; the inner shape depends on msg_type. We flatten
 // post (rich text) into simple markdown-ish plaintext so Claude sees a single
@@ -46,8 +58,7 @@ export function parsePost(msgType: string, rawContent: string): string {
     return ''
   }
   if (msgType === 'post') {
-    const payload = (parsed ?? {}) as PostPayload
-    const locale = payload.zh_cn ?? payload.en_us ?? Object.values(payload)[0]
+    const locale = resolvePostLocale(parsed)
     if (!locale) return ''
     const lines: string[] = []
     if (locale.title) lines.push(locale.title)
@@ -97,8 +108,7 @@ export function extractImageKeys(msgType: string, rawContent: string): string[] 
     const ik = (parsed as { image_key?: string } | null)?.image_key
     if (ik) keys.push(ik)
   } else if (msgType === 'post') {
-    const payload = (parsed ?? {}) as PostPayload
-    const locale = payload.zh_cn ?? payload.en_us ?? Object.values(payload)[0]
+    const locale = resolvePostLocale(parsed)
     if (locale) {
       for (const para of locale.content ?? []) {
         for (const node of para) {
@@ -115,13 +125,50 @@ export function safeName(s: string | undefined): string | undefined {
   return s?.replace(UNSAFE_NAME, '_')
 }
 
+// Detect image format from magic bytes. Falls back to octet-stream when
+// unrecognized — callers still get a usable file, just with a generic ext.
+export function detectImageExt(data: Buffer): { ext: string; mimeType: string } {
+  if (data.length >= 8
+    && data[0] === 0x89 && data[1] === 0x50 && data[2] === 0x4e && data[3] === 0x47) {
+    return { ext: 'png', mimeType: 'image/png' }
+  }
+  if (data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff) {
+    return { ext: 'jpg', mimeType: 'image/jpeg' }
+  }
+  if (data.length >= 6
+    && data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46
+    && data[3] === 0x38 && (data[4] === 0x37 || data[4] === 0x39) && data[5] === 0x61) {
+    return { ext: 'gif', mimeType: 'image/gif' }
+  }
+  if (data.length >= 12
+    && data[0] === 0x52 && data[1] === 0x49 && data[2] === 0x46 && data[3] === 0x46
+    && data[8] === 0x57 && data[9] === 0x45 && data[10] === 0x42 && data[11] === 0x50) {
+    return { ext: 'webp', mimeType: 'image/webp' }
+  }
+  return { ext: 'bin', mimeType: 'application/octet-stream' }
+}
+
+// Sanitize a Feishu message_id for filesystem use. Feishu ids already look
+// safe (om_xxx hex), but anything outside [A-Za-z0-9_-] gets replaced.
+export function safeMessageId(msgId: string): string {
+  return msgId.replace(/[^A-Za-z0-9_-]/g, '_')
+}
+
+// Build the notification body that the channel forwards to Claude. When
+// images are present, append `[image N: /path]` refs; if the text was empty,
+// use "(image)" so the body is never blank.
+export function buildNotificationContent(text: string, imagePaths: string[]): string {
+  if (imagePaths.length === 0) return text
+  const refs = imagePaths.map((p, i) => `\n[image ${i + 1}: ${p}]`).join('')
+  return (text || '(image)') + refs
+}
+
 // ---------------------------------------------------------------------------
 // FeishuClient — SDK wrapper (WSClient for events, Client for REST)
 // ---------------------------------------------------------------------------
 
 import { execSync } from 'node:child_process'
-import { readFileSync, writeFileSync, unlinkSync, mkdirSync } from 'node:fs'
-import { tmpdir } from 'node:os'
+import { readFileSync, mkdirSync, renameSync } from 'node:fs'
 import { dirname, basename, join } from 'node:path'
 import { Client, WSClient, EventDispatcher, LoggerLevel } from '@larksuiteoapi/node-sdk'
 import type { InboundEvent } from './access.ts'
@@ -198,25 +245,34 @@ export class FeishuClient {
     return mid
   }
 
-  // Download an image via lark-cli, returns { data: Buffer, mimeType: string }
-  downloadImage(messageId: string, imageKey: string): { data: Buffer; mimeType: string } {
-    const dir = join(tmpdir(), 'feishu-channel-dl')
-    mkdirSync(dir, { recursive: true })
-    const outFile = `dl-${Date.now()}.bin`
+  // Download an image via lark-cli and persist it under destDir with a proper
+  // extension sniffed from magic bytes. Returns the absolute path + mimeType.
+  // Caller owns the file — we do not auto-delete.
+  downloadImage(
+    messageId: string,
+    imageKey: string,
+    destDir: string,
+    basename: string,
+  ): { path: string; mimeType: string } {
+    mkdirSync(destDir, { recursive: true })
+    const tmpFile = `${basename}.part`
     try {
       execSync(
-        `lark-cli im +messages-resources-download --as bot --message-id ${messageId} --file-key ${imageKey} --type image --output ${outFile}`,
-        { cwd: dir, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] },
+        `lark-cli im +messages-resources-download --as bot --message-id ${messageId} --file-key ${imageKey} --type image --output ${tmpFile}`,
+        { cwd: destDir, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] },
       )
     } catch (err) {
       throw new Error(`downloadImage: lark-cli failed: ${err}`)
     }
-    const filePath = join(dir, outFile)
-    const data = readFileSync(filePath)
-    try { unlinkSync(filePath) } catch {}
-    // Detect mime from magic bytes
-    const mimeType = data[0] === 0xFF && data[1] === 0xD8 ? 'image/jpeg' : 'image/png'
-    return { data, mimeType }
+    const tmpPath = join(destDir, tmpFile)
+    const data = readFileSync(tmpPath)
+    const { ext, mimeType } = detectImageExt(data)
+    const finalPath = join(destDir, `${basename}.${ext}`)
+    try { renameSync(tmpPath, finalPath) } catch {
+      // fall back: leave the .part file and return its path
+      return { path: tmpPath, mimeType }
+    }
+    return { path: finalPath, mimeType }
   }
 
   // Send an image via lark-cli (handles upload internally). lark-cli rejects

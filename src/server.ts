@@ -23,13 +23,14 @@ import {
   type Access,
   type InboundEvent,
 } from './access.ts'
-import { FeishuClient, chunk, parsePost, extractImageKeys } from './feishu.ts'
+import { FeishuClient, chunk, parsePost, extractImageKeys, safeMessageId, buildNotificationContent } from './feishu.ts'
 import { INSTRUCTIONS } from './instructions.ts'
 
 const HOME = homedir()
 const STATE_DIR = resolveStateDir(HOME)
 const ENV_FILE = join(STATE_DIR, '.env')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
+const IMAGES_DIR = join(STATE_DIR, 'images')
 
 // Boot step 1: load .env (no-op if missing).
 loadDotEnv(ENV_FILE)
@@ -319,27 +320,23 @@ async function onEvent(event: InboundEvent): Promise<void> {
   const chatType = event.message.chat_type === 'group' ? 'group' : 'p2p'
   const ts = new Date(Number(event.message.create_time)).toISOString()
 
-  // Download images if present and build content parts
+  // Download images if present, save to disk, reference by absolute path.
+  // Claude reads them with the Read tool — no base64 blob in the notification.
   const imageKeys = extractImageKeys(event.message.message_type, event.message.content)
-  const imageParts: Array<{ data: string; mimeType: string }> = []
-  for (const ik of imageKeys) {
+  const imagePaths: string[] = []
+  const safeMsgId = safeMessageId(event.message.message_id)
+  for (let i = 0; i < imageKeys.length; i++) {
+    const ik = imageKeys[i]!
     try {
-      const { data, mimeType } = feishu.downloadImage(event.message.message_id, ik)
-      imageParts.push({ data: data.toString('base64'), mimeType })
+      const base = `${safeMsgId}-${i + 1}`
+      const { path } = feishu.downloadImage(event.message.message_id, ik, IMAGES_DIR, base)
+      imagePaths.push(path)
     } catch (err) {
       process.stderr.write(`feishu channel: image download failed (${ik}): ${err}\n`)
     }
   }
 
-  // Build notification content: text first, then images as data URIs
-  let fullContent = content
-  if (imageParts.length > 0) {
-    // Append image data URIs so Claude can see them
-    const imageUris = imageParts.map((p, i) =>
-      `\n[image ${i + 1}] data:${p.mimeType};base64,${p.data}`
-    ).join('')
-    fullContent = (content || '(image)') + imageUris
-  }
+  const fullContent = buildNotificationContent(content, imagePaths)
 
   try {
     await mcp.notification({

@@ -1,5 +1,13 @@
 import { describe, expect, test } from 'bun:test'
-import { chunk, parsePost, safeName, extractImageKeys } from '../src/feishu.ts'
+import {
+  chunk,
+  parsePost,
+  safeName,
+  extractImageKeys,
+  detectImageExt,
+  safeMessageId,
+  buildNotificationContent,
+} from '../src/feishu.ts'
 
 describe('chunk', () => {
   test('short text returns as single chunk', () => {
@@ -68,6 +76,17 @@ describe('parsePost', () => {
     expect(parsePost('post', content)).toContain('[Google](https://google.com)')
   })
 
+  test('post with flat {title,content} (no i18n wrapper) renders text', () => {
+    const content = JSON.stringify({
+      title: '',
+      content: [
+        [{ tag: 'img', image_key: 'img_x', width: 100, height: 100 }],
+        [{ tag: 'text', text: '能看到截图吗', style: [] }],
+      ],
+    })
+    expect(parsePost('post', content)).toContain('能看到截图吗')
+  })
+
   test('post with unknown tag preserves text when present', () => {
     const content = JSON.stringify({
       zh_cn: {
@@ -121,6 +140,138 @@ describe('extractImageKeys', () => {
 
   test('returns empty for invalid JSON', () => {
     expect(extractImageKeys('image', 'not json')).toEqual([])
+  })
+
+  test('image type with empty content returns []', () => {
+    expect(extractImageKeys('image', '{}')).toEqual([])
+  })
+
+  test('post with no img nodes returns []', () => {
+    const post = JSON.stringify({
+      zh_cn: {
+        title: 't',
+        content: [[{ tag: 'text', text: 'hi' }, { tag: 'a', text: 'g', href: 'https://g.co' }]],
+      },
+    })
+    expect(extractImageKeys('post', post)).toEqual([])
+  })
+
+  test('post with flat {title,content} (no i18n wrapper) extracts image_key', () => {
+    const content = JSON.stringify({
+      title: '',
+      content: [
+        [{ tag: 'img', image_key: 'img_flat', width: 100, height: 100 }],
+        [{ tag: 'text', text: 'hi' }],
+      ],
+    })
+    expect(extractImageKeys('post', content)).toEqual(['img_flat'])
+  })
+
+  test('post uses en_us when zh_cn missing', () => {
+    const post = JSON.stringify({
+      en_us: { title: '', content: [[{ tag: 'img', image_key: 'img_en' }]] },
+    })
+    expect(extractImageKeys('post', post)).toEqual(['img_en'])
+  })
+
+  test('post with only a non-standard locale falls back to first value', () => {
+    const post = JSON.stringify({
+      ja_jp: { title: '', content: [[{ tag: 'img', image_key: 'img_jp' }]] },
+    })
+    expect(extractImageKeys('post', post)).toEqual(['img_jp'])
+  })
+})
+
+describe('detectImageExt', () => {
+  test('PNG magic bytes', () => {
+    const buf = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])
+    expect(detectImageExt(buf)).toEqual({ ext: 'png', mimeType: 'image/png' })
+  })
+
+  test('JPEG magic bytes', () => {
+    const buf = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00, 0x10])
+    expect(detectImageExt(buf)).toEqual({ ext: 'jpg', mimeType: 'image/jpeg' })
+  })
+
+  test('GIF87a magic bytes', () => {
+    const buf = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x37, 0x61])
+    expect(detectImageExt(buf)).toEqual({ ext: 'gif', mimeType: 'image/gif' })
+  })
+
+  test('GIF89a magic bytes', () => {
+    const buf = Buffer.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])
+    expect(detectImageExt(buf)).toEqual({ ext: 'gif', mimeType: 'image/gif' })
+  })
+
+  test('WEBP magic bytes', () => {
+    const buf = Buffer.from([
+      0x52, 0x49, 0x46, 0x46, // RIFF
+      0x00, 0x00, 0x00, 0x00, // size
+      0x57, 0x45, 0x42, 0x50, // WEBP
+    ])
+    expect(detectImageExt(buf)).toEqual({ ext: 'webp', mimeType: 'image/webp' })
+  })
+
+  test('unknown bytes fall back to octet-stream', () => {
+    const buf = Buffer.from([0x00, 0x01, 0x02, 0x03])
+    expect(detectImageExt(buf)).toEqual({ ext: 'bin', mimeType: 'application/octet-stream' })
+  })
+
+  test('short buffer does not crash', () => {
+    expect(detectImageExt(Buffer.from([0x89]))).toEqual({ ext: 'bin', mimeType: 'application/octet-stream' })
+  })
+
+  test('RIFF header without WEBP marker falls back to octet-stream', () => {
+    // RIFF container but e.g. WAV (WAVE at offset 8), not an image
+    const buf = Buffer.from([
+      0x52, 0x49, 0x46, 0x46, // RIFF
+      0x00, 0x00, 0x00, 0x00,
+      0x57, 0x41, 0x56, 0x45, // WAVE (not WEBP)
+    ])
+    expect(detectImageExt(buf)).toEqual({ ext: 'bin', mimeType: 'application/octet-stream' })
+  })
+})
+
+describe('safeMessageId', () => {
+  test('typical om_xxx id passes through unchanged', () => {
+    expect(safeMessageId('om_x100b51576fc1dca8c358a6ae71a4fa8')).toBe('om_x100b51576fc1dca8c358a6ae71a4fa8')
+  })
+
+  test('path separators and dots get replaced', () => {
+    expect(safeMessageId('../etc/passwd')).toBe('___etc_passwd')
+  })
+
+  test('shell metachars get replaced', () => {
+    expect(safeMessageId('a;rm -rf /')).toBe('a_rm_-rf__')
+  })
+
+  test('preserves hyphens and underscores', () => {
+    expect(safeMessageId('om-1_b-2')).toBe('om-1_b-2')
+  })
+})
+
+describe('buildNotificationContent', () => {
+  test('no images → text unchanged', () => {
+    expect(buildNotificationContent('hello', [])).toBe('hello')
+  })
+
+  test('no images and empty text → empty string (no "(image)" fallback)', () => {
+    expect(buildNotificationContent('', [])).toBe('')
+  })
+
+  test('text + single image → appends "[image 1: path]" on new line', () => {
+    expect(buildNotificationContent('hello', ['/a/b.png']))
+      .toBe('hello\n[image 1: /a/b.png]')
+  })
+
+  test('empty text + image → "(image)" fallback prefix', () => {
+    expect(buildNotificationContent('', ['/a/b.png']))
+      .toBe('(image)\n[image 1: /a/b.png]')
+  })
+
+  test('text + multiple images → numbered refs, order preserved', () => {
+    expect(buildNotificationContent('hi', ['/one.png', '/two.jpg', '/three.gif']))
+      .toBe('hi\n[image 1: /one.png]\n[image 2: /two.jpg]\n[image 3: /three.gif]')
   })
 })
 
