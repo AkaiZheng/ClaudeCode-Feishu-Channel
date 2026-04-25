@@ -207,6 +207,23 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
         required: ['chat_id', 'file_path'],
       },
     },
+    {
+      name: 'reply_card',
+      description:
+        'Send an interactive card on Feishu. Provide the card payload as a JSON string (Feishu card schema with header/elements). Use this only when the user benefits from buttons, columns, or other rich card structures — for plain prose use the reply tool instead. Optionally reply_to to thread under a message.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string', description: 'Target conversation ID (oc_xxx)' },
+          card: { type: 'string', description: 'JSON string of the Feishu interactive card payload' },
+          reply_to: {
+            type: 'string',
+            description: 'message_id (om_xxx) to thread under. Omit for normal send.',
+          },
+        },
+        required: ['chat_id', 'card'],
+      },
+    },
   ],
 }))
 
@@ -317,6 +334,30 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
       clearTypingIndicator(chatId)
       return { content: [{ type: 'text', text: `file sent (id: ${mid})` }] }
+    }
+
+    if (req.params.name === 'reply_card') {
+      const chatId = String(args.chat_id ?? '')
+      const card = String(args.card ?? '')
+      const replyTo = args.reply_to != null ? String(args.reply_to) : undefined
+
+      if (!chatId) throw new Error('reply_card: chat_id is required')
+      if (!card) throw new Error('reply_card: card is required')
+      try { JSON.parse(card) } catch (err) {
+        throw new Error(`reply_card: card must be valid JSON: ${err instanceof Error ? err.message : err}`)
+      }
+
+      assertAllowedChat(readAccessFile(ACCESS_FILE), chatId)
+
+      let mid: string
+      if (replyTo) {
+        mid = feishu.replyCard(replyTo, card)
+      } else {
+        mid = feishu.sendCard(chatId, card)
+      }
+
+      clearTypingIndicator(chatId)
+      return { content: [{ type: 'text', text: `card sent (id: ${mid})` }] }
     }
 
     return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }

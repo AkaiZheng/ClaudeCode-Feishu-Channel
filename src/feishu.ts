@@ -76,6 +76,12 @@ export function parsePost(msgType: string, rawContent: string): string {
     const name = (parsed as { file_name?: string } | null)?.file_name
     return name ? `(file: ${name})` : '(file)'
   }
+  if (msgType === 'interactive') {
+    return parseInteractive(rawContent)
+  }
+  if (msgType === 'merge_forward') {
+    return parseMergeForward(rawContent)
+  }
   return `(${msgType})`
 }
 
@@ -101,6 +107,7 @@ function renderNode(node: PostNode): string {
 
 // Extract all image_key values from a message for downloading.
 export function extractImageKeys(msgType: string, rawContent: string): string[] {
+  if (msgType === 'interactive') return extractImageKeysFromInteractive(rawContent)
   let parsed: unknown
   try { parsed = JSON.parse(rawContent) } catch { return [] }
   const keys: string[] = []
@@ -128,6 +135,94 @@ export function extractFileInfo(msgType: string, rawContent: string): { fileKey:
   const obj = parsed as { file_key?: string; file_name?: string } | null
   if (!obj?.file_key) return null
   return { fileKey: obj.file_key, fileName: obj.file_name ?? 'unknown' }
+}
+
+// Card payloads have many element shapes (div, markdown, action, column_set,
+// note, hr, fields…). We don't try to enumerate them; instead walk the tree
+// and pull out anything text-like — `text.content`, plain `content`, button
+// labels — so the fallback render keeps the human-readable parts.
+type CardElement = {
+  tag?: string
+  text?: { content?: string } | string
+  content?: string
+  actions?: Array<{ text?: { content?: string } }>
+  elements?: CardElement[]
+  fields?: Array<{ text?: { content?: string } }>
+  img_key?: string
+  [k: string]: unknown
+}
+
+function walkCardText(el: CardElement | null | undefined, out: string[]): void {
+  if (!el || typeof el !== 'object') return
+  if (typeof el.text === 'object' && el.text?.content) out.push(el.text.content)
+  if (typeof el.content === 'string' && el.content) out.push(el.content)
+  if (el.actions) {
+    for (const a of el.actions) {
+      if (a?.text?.content) out.push(`[${a.text.content}]`)
+    }
+  }
+  if (el.fields) {
+    for (const f of el.fields) {
+      if (f?.text?.content) out.push(f.text.content)
+    }
+  }
+  if (el.elements) {
+    for (const child of el.elements) walkCardText(child, out)
+  }
+}
+
+function walkCardImageKeys(el: CardElement | null | undefined, out: string[]): void {
+  if (!el || typeof el !== 'object') return
+  if (el.tag === 'img' && typeof el.img_key === 'string' && el.img_key) out.push(el.img_key)
+  if (el.elements) {
+    for (const child of el.elements) walkCardImageKeys(child, out)
+  }
+}
+
+// Render an interactive card payload as `<card title="...">…</card>`, mirroring
+// lark-cli mget's format so Claude sees a consistent shape regardless of which
+// path produced the text. Used only as a fallback when mget is unavailable.
+export function parseInteractive(rawContent: string): string {
+  let parsed: unknown
+  try { parsed = JSON.parse(rawContent) } catch { return '(card)' }
+  if (!parsed || typeof parsed !== 'object') return '(card)'
+  const card = parsed as { header?: { title?: { content?: string } }; elements?: CardElement[] }
+  const title = card.header?.title?.content
+  const lines: string[] = []
+  for (const el of card.elements ?? []) walkCardText(el, lines)
+  const body = lines.filter(Boolean).join('\n')
+  const open = title ? `<card title="${title.replace(/"/g, '\\"')}">` : '<card>'
+  return body ? `${open}\n${body}\n</card>` : `${open}</card>`
+}
+
+// merge_forward content carries the source chat title and a list of forwarded
+// message ids. Without follow-up API calls we can't expand the bodies, so
+// produce a placeholder summarizing what we know — lark-cli mget normally
+// renders the full thread, this is the fallback path.
+export function parseMergeForward(rawContent: string): string {
+  let parsed: unknown
+  try { parsed = JSON.parse(rawContent) } catch { return '<forwarded_messages/>' }
+  if (!parsed || typeof parsed !== 'object') return '<forwarded_messages/>'
+  const obj = parsed as { title?: string; list?: unknown[] }
+  const count = Array.isArray(obj.list) ? obj.list.length : 0
+  const titleAttr = obj.title ? ` title="${obj.title.replace(/"/g, '\\"')}"` : ''
+  const body = count > 0 ? `(${count} message${count === 1 ? '' : 's'})` : ''
+  return body
+    ? `<forwarded_messages${titleAttr}>${body}</forwarded_messages>`
+    : `<forwarded_messages${titleAttr}/>`
+}
+
+// Cards can embed image elements (`{tag: 'img', img_key: 'img_xxx'}`) at any
+// nesting level. Walk and collect them so the inbound path can download the
+// pictures alongside the rendered card text.
+export function extractImageKeysFromInteractive(rawContent: string): string[] {
+  let parsed: unknown
+  try { parsed = JSON.parse(rawContent) } catch { return [] }
+  if (!parsed || typeof parsed !== 'object') return []
+  const card = parsed as { elements?: CardElement[] }
+  const keys: string[] = []
+  for (const el of card.elements ?? []) walkCardImageKeys(el, keys)
+  return keys
 }
 
 // lark-cli mget renders file attachments as `<file key="file_xxx" name="name.ext"/>`.
@@ -374,6 +469,30 @@ export class FeishuClient {
     )
     const mid = JSON.parse(out)?.data?.message_id
     if (!mid) throw new Error('replyMarkdown: no message_id in lark-cli output')
+    return mid
+  }
+
+  // Send an interactive card. `cardJson` is the raw card payload as a JSON string.
+  sendCard(chatId: string, cardJson: string): string {
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-send', '--as', 'bot', '--chat-id', chatId, '--msg-type', 'interactive', '--content', cardJson],
+      { encoding: 'utf8', timeout: 30000 },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('sendCard: no message_id in lark-cli output')
+    return mid
+  }
+
+  // Reply with an interactive card.
+  replyCard(messageId: string, cardJson: string): string {
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-reply', '--as', 'bot', '--message-id', messageId, '--msg-type', 'interactive', '--content', cardJson],
+      { encoding: 'utf8', timeout: 30000 },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('replyCard: no message_id in lark-cli output')
     return mid
   }
 

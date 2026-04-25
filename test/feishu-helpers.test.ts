@@ -2,8 +2,11 @@ import { describe, expect, test } from 'bun:test'
 import {
   chunk,
   parsePost,
+  parseInteractive,
+  parseMergeForward,
   safeName,
   extractImageKeys,
+  extractImageKeysFromInteractive,
   extractFileInfo,
   extractImageRefsFromRendered,
   extractFileRefsFromRendered,
@@ -398,5 +401,162 @@ describe('extractFileRefsFromRendered', () => {
     const real = '<file key="file_v3_00113_118d25c6-efdc-41d7-9f44-6bc48375a59g" name="test-config.json"/>'
     const result = extractFileRefsFromRendered(real)
     expect(result.files).toEqual([{ fileKey: 'file_v3_00113_118d25c6-efdc-41d7-9f44-6bc48375a59g', fileName: 'test-config.json' }])
+  })
+})
+
+describe('parseInteractive', () => {
+  test('renders title, body text, and button label', () => {
+    const card = JSON.stringify({
+      header: { title: { tag: 'plain_text', content: '测试卡片' } },
+      elements: [
+        { tag: 'div', text: { tag: 'lark_md', content: '这是一条卡片消息' } },
+        { tag: 'action', actions: [{ tag: 'button', text: { tag: 'plain_text', content: '按钮' } }] },
+      ],
+    })
+    const out = parseInteractive(card)
+    expect(out).toContain('测试卡片')
+    expect(out).toContain('这是一条卡片消息')
+    expect(out).toContain('[按钮]')
+    expect(out.startsWith('<card title="测试卡片">')).toBe(true)
+    expect(out.endsWith('</card>')).toBe(true)
+  })
+
+  test('card without title still wraps body', () => {
+    const card = JSON.stringify({
+      elements: [{ tag: 'div', text: { content: 'just body' } }],
+    })
+    const out = parseInteractive(card)
+    expect(out).toContain('just body')
+    expect(out.startsWith('<card>')).toBe(true)
+  })
+
+  test('markdown element with content field is included', () => {
+    const card = JSON.stringify({
+      elements: [{ tag: 'markdown', content: '**bold**' }],
+    })
+    expect(parseInteractive(card)).toContain('**bold**')
+  })
+
+  test('nested column_set surfaces inner text', () => {
+    const card = JSON.stringify({
+      elements: [
+        {
+          tag: 'column_set',
+          elements: [
+            { tag: 'div', text: { content: 'left' } },
+            { tag: 'div', text: { content: 'right' } },
+          ],
+        },
+      ],
+    })
+    const out = parseInteractive(card)
+    expect(out).toContain('left')
+    expect(out).toContain('right')
+  })
+
+  test('field elements are included', () => {
+    const card = JSON.stringify({
+      elements: [{ tag: 'div', fields: [{ text: { content: 'k=v' } }] }],
+    })
+    expect(parseInteractive(card)).toContain('k=v')
+  })
+
+  test('invalid JSON returns "(card)"', () => {
+    expect(() => parseInteractive('not json')).not.toThrow()
+    expect(parseInteractive('not json')).toBe('(card)')
+  })
+
+  test('empty card body collapses to self-closing-ish open/close', () => {
+    expect(parseInteractive(JSON.stringify({ header: { title: { content: 'x' } } })))
+      .toBe('<card title="x"></card>')
+  })
+
+  test('title with embedded quote is escaped', () => {
+    const card = JSON.stringify({ header: { title: { content: 'a"b' } }, elements: [] })
+    expect(parseInteractive(card)).toContain('<card title="a\\"b">')
+  })
+})
+
+describe('parseMergeForward', () => {
+  test('renders title and message count', () => {
+    const raw = JSON.stringify({ title: 'Group A', list: ['om_1', 'om_2', 'om_3'] })
+    const out = parseMergeForward(raw)
+    expect(out).toContain('Group A')
+    expect(out).toContain('(3 messages)')
+  })
+
+  test('singular message count', () => {
+    const raw = JSON.stringify({ title: 'X', list: ['om_1'] })
+    expect(parseMergeForward(raw)).toContain('(1 message)')
+  })
+
+  test('no list → self-closing tag', () => {
+    expect(parseMergeForward(JSON.stringify({ title: 'X' })))
+      .toBe('<forwarded_messages title="X"/>')
+  })
+
+  test('invalid JSON returns placeholder', () => {
+    expect(() => parseMergeForward('not json')).not.toThrow()
+    expect(parseMergeForward('not json')).toBe('<forwarded_messages/>')
+  })
+})
+
+describe('extractImageKeysFromInteractive', () => {
+  test('extracts img_key from top-level img element', () => {
+    const card = JSON.stringify({
+      elements: [
+        { tag: 'img', img_key: 'img_card_1' },
+        { tag: 'div', text: { content: 'hi' } },
+      ],
+    })
+    expect(extractImageKeysFromInteractive(card)).toEqual(['img_card_1'])
+  })
+
+  test('extracts from nested column_set', () => {
+    const card = JSON.stringify({
+      elements: [
+        {
+          tag: 'column_set',
+          elements: [
+            { tag: 'img', img_key: 'img_nested_a' },
+            { tag: 'img', img_key: 'img_nested_b' },
+          ],
+        },
+      ],
+    })
+    expect(extractImageKeysFromInteractive(card)).toEqual(['img_nested_a', 'img_nested_b'])
+  })
+
+  test('returns empty for invalid JSON', () => {
+    expect(extractImageKeysFromInteractive('not json')).toEqual([])
+  })
+
+  test('returns empty when no img elements', () => {
+    expect(extractImageKeysFromInteractive(JSON.stringify({ elements: [{ tag: 'div', text: { content: 'x' } }] })))
+      .toEqual([])
+  })
+})
+
+describe('parsePost dispatch for interactive / merge_forward', () => {
+  test('interactive msg_type delegates to parseInteractive', () => {
+    const card = JSON.stringify({
+      header: { title: { content: 'Card' } },
+      elements: [{ tag: 'div', text: { content: 'body' } }],
+    })
+    const out = parsePost('interactive', card)
+    expect(out).toContain('Card')
+    expect(out).toContain('body')
+  })
+
+  test('merge_forward msg_type delegates to parseMergeForward', () => {
+    const raw = JSON.stringify({ title: 'Group', list: ['om_1'] })
+    expect(parsePost('merge_forward', raw)).toContain('Group')
+  })
+})
+
+describe('extractImageKeys for interactive', () => {
+  test('routes to interactive extractor', () => {
+    const card = JSON.stringify({ elements: [{ tag: 'img', img_key: 'img_in_card' }] })
+    expect(extractImageKeys('interactive', card)).toEqual(['img_in_card'])
   })
 })
