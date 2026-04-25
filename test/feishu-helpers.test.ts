@@ -4,7 +4,9 @@ import {
   parsePost,
   safeName,
   extractImageKeys,
+  extractFileInfo,
   extractImageRefsFromRendered,
+  extractFileRefsFromRendered,
   detectImageExt,
   safeMessageId,
   buildNotificationContent,
@@ -329,5 +331,72 @@ describe('safeName', () => {
 
   test('clean name unchanged', () => {
     expect(safeName('report.pdf')).toBe('report.pdf')
+  })
+})
+
+describe('extractFileInfo', () => {
+  test('file message → fileKey + fileName', () => {
+    const raw = JSON.stringify({ file_key: 'file_abc', file_name: 'report.pdf' })
+    expect(extractFileInfo('file', raw))
+      .toEqual({ fileKey: 'file_abc', fileName: 'report.pdf' })
+  })
+
+  test('non-file message → null', () => {
+    expect(extractFileInfo('text', '{"text":"hi"}')).toBeNull()
+    expect(extractFileInfo('image', '{"image_key":"img_x"}')).toBeNull()
+  })
+
+  test('file without file_key → null', () => {
+    expect(extractFileInfo('file', '{"file_name":"x.txt"}')).toBeNull()
+  })
+
+  test('file without file_name → defaults to unknown', () => {
+    const result = extractFileInfo('file', '{"file_key":"file_abc"}')
+    expect(result).toEqual({ fileKey: 'file_abc', fileName: 'unknown' })
+  })
+})
+
+describe('extractFileRefsFromRendered', () => {
+  test('no file markers → empty files, text unchanged', () => {
+    expect(extractFileRefsFromRendered('hello world'))
+      .toEqual({ text: 'hello world', files: [] })
+  })
+
+  test('single file marker (lark-cli mget format) → extracts key and name', () => {
+    expect(extractFileRefsFromRendered('<file key="file_abc" name="report.pdf"/>\nsome text'))
+      .toEqual({ text: 'some text', files: [{ fileKey: 'file_abc', fileName: 'report.pdf' }] })
+  })
+
+  test('file-only content → empty text', () => {
+    expect(extractFileRefsFromRendered('<file key="file_abc" name="doc.txt"/>'))
+      .toEqual({ text: '', files: [{ fileKey: 'file_abc', fileName: 'doc.txt' }] })
+  })
+
+  test('multiple files → order preserved', () => {
+    const rendered = '<file key="file_1" name="a.pdf"/>\nhello\n<file key="file_2" name="b.xlsx"/>'
+    const result = extractFileRefsFromRendered(rendered)
+    expect(result.files).toEqual([
+      { fileKey: 'file_1', fileName: 'a.pdf' },
+      { fileKey: 'file_2', fileName: 'b.xlsx' },
+    ])
+    expect(result.text).toBe('hello')
+  })
+
+  test('mixed images and files → only extracts files', () => {
+    const rendered = '[Image: img_x]\n<file key="file_y" name="data.csv"/>\nhello'
+    const result = extractFileRefsFromRendered(rendered)
+    expect(result.files).toEqual([{ fileKey: 'file_y', fileName: 'data.csv' }])
+    expect(result.text).toContain('[Image: img_x]')
+  })
+
+  test('self-closing tag without space before slash', () => {
+    expect(extractFileRefsFromRendered('<file key="file_z" name="test.json"/>'))
+      .toEqual({ text: '', files: [{ fileKey: 'file_z', fileName: 'test.json' }] })
+  })
+
+  test('real lark-cli mget output', () => {
+    const real = '<file key="file_v3_00113_118d25c6-efdc-41d7-9f44-6bc48375a59g" name="test-config.json"/>'
+    const result = extractFileRefsFromRendered(real)
+    expect(result.files).toEqual([{ fileKey: 'file_v3_00113_118d25c6-efdc-41d7-9f44-6bc48375a59g', fileName: 'test-config.json' }])
   })
 })

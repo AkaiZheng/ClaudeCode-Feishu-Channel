@@ -4,7 +4,7 @@
 export const INSTRUCTIONS = [
   'The sender reads Feishu, not this session. Anything you want them to see must go through the reply tool — your transcript output never reaches their chat.',
   '',
-  'Messages from Feishu arrive as <channel source="feishu" chat_id="..." message_id="..." user_id="..." user="..." chat_type="p2p|group" ts="...">. Reply with the reply tool, passing chat_id back verbatim. Use reply_to (set to the message_id) when you are threading under a specific earlier message; for normal back-and-forth omit reply_to.',
+  'Messages from Feishu arrive as <channel source="feishu" chat_id="..." message_id="..." user_id="..." user="..." chat_type="p2p|group" ts="...">. Reply with the reply tool, passing chat_id back verbatim. Use reply_to (set to the message_id) when you are threading under a specific earlier message; for normal back-and-forth omit reply_to. Use reply_image (base64 image data) to send pictures and reply_file (absolute path) to send files.',
   '',
   'Feishu\'s bot API exposes no chat history or search — you only see messages as they arrive. If you need earlier context, ask the user to paste it.',
   '',

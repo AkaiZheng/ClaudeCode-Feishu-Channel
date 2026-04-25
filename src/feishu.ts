@@ -120,6 +120,29 @@ export function extractImageKeys(msgType: string, rawContent: string): string[] 
   return keys
 }
 
+// Extract file_key and file_name from a file message.
+export function extractFileInfo(msgType: string, rawContent: string): { fileKey: string; fileName: string } | null {
+  if (msgType !== 'file') return null
+  let parsed: unknown
+  try { parsed = JSON.parse(rawContent) } catch { return null }
+  const obj = parsed as { file_key?: string; file_name?: string } | null
+  if (!obj?.file_key) return null
+  return { fileKey: obj.file_key, fileName: obj.file_name ?? 'unknown' }
+}
+
+// lark-cli mget renders file attachments as `<file key="file_xxx" name="name.ext"/>`.
+const LARKCLI_FILE_MARKER = /<file\s+key="(file_[A-Za-z0-9_-]+)"\s+name="([^"]+)"\s*\/?>\n?/g
+export function extractFileRefsFromRendered(
+  content: string,
+): { text: string; files: Array<{ fileKey: string; fileName: string }> } {
+  const files: Array<{ fileKey: string; fileName: string }> = []
+  const stripped = content.replace(LARKCLI_FILE_MARKER, (_, key, name) => {
+    files.push({ fileKey: key, fileName: name })
+    return ''
+  })
+  return { text: stripped.replace(/^\n+|\n+$/g, ''), files }
+}
+
 const UNSAFE_NAME = /[<>\[\]\r\n;]/g
 export function safeName(s: string | undefined): string | undefined {
   return s?.replace(UNSAFE_NAME, '_')
@@ -182,7 +205,7 @@ export function buildNotificationContent(text: string, imagePaths: string[]): st
 // FeishuClient — SDK wrapper (WSClient for events, Client for REST)
 // ---------------------------------------------------------------------------
 
-import { execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import { readFileSync, mkdirSync, renameSync } from 'node:fs'
 import { dirname, basename, join } from 'node:path'
 import { Client, WSClient, EventDispatcher, LoggerLevel } from '@larksuiteoapi/node-sdk'
@@ -267,8 +290,9 @@ export class FeishuClient {
   fetchRenderedMessage(messageId: string): { content: string; msgType: string } {
     let out: string
     try {
-      out = execSync(
-        `lark-cli im +messages-mget --as bot --message-ids ${messageId} --format json`,
+      out = execFileSync(
+        'lark-cli',
+        ['im', '+messages-mget', '--as', 'bot', '--message-ids', messageId, '--format', 'json'],
         { encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] },
       )
     } catch (err) {
@@ -284,6 +308,75 @@ export class FeishuClient {
     return { content: String(msg.content ?? ''), msgType: String(msg.msg_type ?? 'unknown') }
   }
 
+  // Download a file via lark-cli. Preserves the original filename.
+  downloadFile(
+    messageId: string,
+    fileKey: string,
+    destDir: string,
+    fileName: string,
+  ): string {
+    mkdirSync(destDir, { recursive: true })
+    const safeFn = fileName.replace(/[^A-Za-z0-9._-]/g, '_')
+    try {
+      execFileSync(
+        'lark-cli',
+        ['im', '+messages-resources-download', '--as', 'bot', '--message-id', messageId, '--file-key', fileKey, '--type', 'file', '--output', safeFn],
+        { cwd: destDir, timeout: 60000, stdio: ['pipe', 'pipe', 'pipe'] },
+      )
+    } catch (err) {
+      throw new Error(`downloadFile: lark-cli failed: ${err}`)
+    }
+    return join(destDir, safeFn)
+  }
+
+  // Send a file via lark-cli.
+  sendFile(chatId: string, filePath: string): string {
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-send', '--as', 'bot', '--chat-id', chatId, '--file', basename(filePath)],
+      { encoding: 'utf8', timeout: 60000, cwd: dirname(filePath) },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('sendFile: no message_id in lark-cli output')
+    return mid
+  }
+
+  // Reply with a file via lark-cli.
+  replyFile(messageId: string, filePath: string): string {
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-reply', '--as', 'bot', '--message-id', messageId, '--file', basename(filePath)],
+      { encoding: 'utf8', timeout: 60000, cwd: dirname(filePath) },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('replyFile: no message_id in lark-cli output')
+    return mid
+  }
+
+  // Send markdown via lark-cli (auto-wrapped as post with style optimization).
+  sendMarkdown(chatId: string, markdown: string): string {
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-send', '--as', 'bot', '--chat-id', chatId, '--markdown', markdown],
+      { encoding: 'utf8', timeout: 30000 },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('sendMarkdown: no message_id in lark-cli output')
+    return mid
+  }
+
+  // Reply with markdown via lark-cli.
+  replyMarkdown(messageId: string, markdown: string): string {
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-reply', '--as', 'bot', '--message-id', messageId, '--markdown', markdown],
+      { encoding: 'utf8', timeout: 30000 },
+    )
+    const mid = JSON.parse(out)?.data?.message_id
+    if (!mid) throw new Error('replyMarkdown: no message_id in lark-cli output')
+    return mid
+  }
+
   // Download an image via lark-cli and persist it under destDir with a proper
   // extension sniffed from magic bytes. Returns the absolute path + mimeType.
   // Caller owns the file — we do not auto-delete.
@@ -296,8 +389,9 @@ export class FeishuClient {
     mkdirSync(destDir, { recursive: true })
     const tmpFile = `${basename}.part`
     try {
-      execSync(
-        `lark-cli im +messages-resources-download --as bot --message-id ${messageId} --file-key ${imageKey} --type image --output ${tmpFile}`,
+      execFileSync(
+        'lark-cli',
+        ['im', '+messages-resources-download', '--as', 'bot', '--message-id', messageId, '--file-key', imageKey, '--type', 'image', '--output', tmpFile],
         { cwd: destDir, timeout: 30000, stdio: ['pipe', 'pipe', 'pipe'] },
       )
     } catch (err) {
@@ -317,8 +411,9 @@ export class FeishuClient {
   // Send an image via lark-cli (handles upload internally). lark-cli rejects
   // absolute --image paths, so we cd into the file's directory and pass basename.
   sendImage(chatId: string, imagePath: string): string {
-    const out = execSync(
-      `lark-cli im +messages-send --as bot --chat-id ${chatId} --image ${basename(imagePath)}`,
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-send', '--as', 'bot', '--chat-id', chatId, '--image', basename(imagePath)],
       { encoding: 'utf8', timeout: 30000, cwd: dirname(imagePath) },
     )
     const mid = JSON.parse(out)?.data?.message_id
@@ -327,8 +422,9 @@ export class FeishuClient {
   }
 
   replyImage(messageId: string, imagePath: string): string {
-    const out = execSync(
-      `lark-cli im +messages-reply --as bot --message-id ${messageId} --image ${basename(imagePath)}`,
+    const out = execFileSync(
+      'lark-cli',
+      ['im', '+messages-reply', '--as', 'bot', '--message-id', messageId, '--image', basename(imagePath)],
       { encoding: 'utf8', timeout: 30000, cwd: dirname(imagePath) },
     )
     const mid = JSON.parse(out)?.data?.message_id

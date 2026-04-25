@@ -29,6 +29,8 @@ import {
   parsePost,
   extractImageKeys,
   extractImageRefsFromRendered,
+  extractFileInfo,
+  extractFileRefsFromRendered,
   safeMessageId,
   buildNotificationContent,
 } from './feishu.ts'
@@ -39,6 +41,7 @@ const STATE_DIR = resolveStateDir(HOME)
 const ENV_FILE = join(STATE_DIR, '.env')
 const ACCESS_FILE = join(STATE_DIR, 'access.json')
 const IMAGES_DIR = join(STATE_DIR, 'images')
+const FILES_DIR = join(STATE_DIR, 'files')
 
 // Boot step 1: load .env (no-op if missing).
 loadDotEnv(ENV_FILE)
@@ -148,7 +151,7 @@ const TYPING_EMOJI = 'OnIt'
 const activeReactions = new Map<string, { messageId: string; reactionId: string }>()
 
 // ---------------------------------------------------------------------------
-// Tool registry — P0 has only `reply`.
+// Tool registry
 // ---------------------------------------------------------------------------
 
 mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -156,12 +159,12 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
     {
       name: 'reply',
       description:
-        'Reply on Feishu. Pass chat_id verbatim from the inbound <channel> block. Optionally pass reply_to (an om_xxx message_id) to thread under a specific earlier message; the first chunk is threaded, later chunks send plainly.',
+        'Reply on Feishu with markdown. Supports bold, italic, links, code blocks, lists, etc. Pass chat_id verbatim from the inbound <channel> block. Optionally pass reply_to (an om_xxx message_id) to thread under a specific earlier message.',
       inputSchema: {
         type: 'object',
         properties: {
           chat_id: { type: 'string', description: 'Target conversation ID (oc_xxx)' },
-          text: { type: 'string', description: 'Message body; any UTF-8 string' },
+          text: { type: 'string', description: 'Message body in markdown format' },
           reply_to: {
             type: 'string',
             description: 'message_id (om_xxx) to thread under. Omit for normal replies.',
@@ -185,6 +188,23 @@ mcp.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['chat_id', 'image_data'],
+      },
+    },
+    {
+      name: 'reply_file',
+      description:
+        'Send a file on Feishu. Provide the absolute path to a local file. The file will be uploaded to Feishu and sent to the chat. Optionally reply_to to thread under a message.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          chat_id: { type: 'string', description: 'Target conversation ID (oc_xxx)' },
+          file_path: { type: 'string', description: 'Absolute path to the file to send' },
+          reply_to: {
+            type: 'string',
+            description: 'message_id (om_xxx) to thread under. Omit for normal send.',
+          },
+        },
+        required: ['chat_id', 'file_path'],
       },
     },
   ],
@@ -220,10 +240,21 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       const sentIds: string[] = []
       for (const [i, piece] of chunks.entries()) {
         let id: string
-        if (i === 0 && replyTo) {
-          id = await feishu.replyText(replyTo, piece)
-        } else {
-          id = await feishu.sendText(chatId, piece)
+        try {
+          // Prefer markdown for rich formatting (links, code blocks, lists)
+          if (i === 0 && replyTo) {
+            id = feishu.replyMarkdown(replyTo, piece)
+          } else {
+            id = feishu.sendMarkdown(chatId, piece)
+          }
+        } catch (err) {
+          process.stderr.write(`feishu channel: markdown send failed, falling back to text: ${err}\n`)
+          // Fallback to plain text if markdown send fails
+          if (i === 0 && replyTo) {
+            id = await feishu.replyText(replyTo, piece)
+          } else {
+            id = await feishu.sendText(chatId, piece)
+          }
         }
         sentIds.push(id)
       }
@@ -245,7 +276,7 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       assertAllowedChat(readAccessFile(ACCESS_FILE), chatId)
 
       // Strip data URI prefix if present
-      const dataUriMatch = imageData.match(/^data:image\/\w+;base64,(.+)$/)
+      const dataUriMatch = imageData.match(/^data:image\/[^;]+;base64,(.+)$/)
       if (dataUriMatch) imageData = dataUriMatch[1]!
 
       // Write to temp file for lark-cli
@@ -265,6 +296,27 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 
       clearTypingIndicator(chatId)
       return { content: [{ type: 'text', text: `image sent (id: ${mid})` }] }
+    }
+
+    if (req.params.name === 'reply_file') {
+      const chatId = String(args.chat_id ?? '')
+      const filePath = String(args.file_path ?? '')
+      const replyTo = args.reply_to != null ? String(args.reply_to) : undefined
+
+      if (!chatId) throw new Error('reply_file: chat_id is required')
+      if (!filePath) throw new Error('reply_file: file_path is required')
+
+      assertAllowedChat(readAccessFile(ACCESS_FILE), chatId)
+
+      let mid: string
+      if (replyTo) {
+        mid = feishu.replyFile(replyTo, filePath)
+      } else {
+        mid = feishu.sendFile(chatId, filePath)
+      }
+
+      clearTypingIndicator(chatId)
+      return { content: [{ type: 'text', text: `file sent (id: ${mid})` }] }
     }
 
     return { content: [{ type: 'text', text: `unknown tool: ${req.params.name}` }], isError: true }
@@ -331,19 +383,26 @@ async function onEvent(event: InboundEvent): Promise<void> {
   // unreachable — degraded but still delivers something.
   let content: string
   let imageKeys: string[]
+  let fileInfos: Array<{ fileKey: string; fileName: string }> = []
   try {
     const rendered = feishu.fetchRenderedMessage(event.message.message_id)
-    const refs = extractImageRefsFromRendered(rendered.content)
-    content = refs.text
-    imageKeys = refs.imageKeys
+    const imgRefs = extractImageRefsFromRendered(rendered.content)
+    const fileRefs = extractFileRefsFromRendered(imgRefs.text)
+    content = fileRefs.text
+    imageKeys = imgRefs.imageKeys
+    fileInfos = fileRefs.files
   } catch (err) {
     process.stderr.write(`feishu channel: mget failed, falling back to local parse: ${err}\n`)
     content = parsePost(event.message.message_type, event.message.content)
     imageKeys = extractImageKeys(event.message.message_type, event.message.content)
+    const fi = extractFileInfo(event.message.message_type, event.message.content)
+    if (fi) fileInfos = [fi]
   }
 
-  const imagePaths: string[] = []
   const safeMsgId = safeMessageId(event.message.message_id)
+
+  // Download images
+  const imagePaths: string[] = []
   for (let i = 0; i < imageKeys.length; i++) {
     const ik = imageKeys[i]!
     try {
@@ -355,7 +414,23 @@ async function onEvent(event: InboundEvent): Promise<void> {
     }
   }
 
-  const fullContent = buildNotificationContent(content, imagePaths)
+  // Download files
+  const filePaths: string[] = []
+  for (const fi of fileInfos) {
+    try {
+      const path = feishu.downloadFile(event.message.message_id, fi.fileKey, FILES_DIR, fi.fileName)
+      filePaths.push(path)
+    } catch (err) {
+      process.stderr.write(`feishu channel: file download failed (${fi.fileKey}): ${err}\n`)
+    }
+  }
+
+  // Build notification with image and file refs
+  let fullContent = buildNotificationContent(content, imagePaths)
+  if (filePaths.length > 0) {
+    const fileRefs = filePaths.map((p, i) => `[file ${i + 1}: ${p}]`).join('\n')
+    fullContent = fullContent ? `${fullContent}\n${fileRefs}` : fileRefs
+  }
 
   try {
     await mcp.notification({
