@@ -154,6 +154,21 @@ export function safeMessageId(msgId: string): string {
   return msgId.replace(/[^A-Za-z0-9_-]/g, '_')
 }
 
+// lark-cli pre-renders image attachments as `[Image: img_xxx]`. Pull those
+// out so we can download them separately, and strip the markers from the
+// text we show Claude (we'll reattach our own `[image N: /path]` refs).
+const LARKCLI_IMAGE_MARKER = /\[Image: (img_[A-Za-z0-9_-]+)\]\n?/g
+export function extractImageRefsFromRendered(
+  content: string,
+): { text: string; imageKeys: string[] } {
+  const imageKeys: string[] = []
+  const stripped = content.replace(LARKCLI_IMAGE_MARKER, (_, key) => {
+    imageKeys.push(key)
+    return ''
+  })
+  return { text: stripped.replace(/^\n+|\n+$/g, ''), imageKeys }
+}
+
 // Build the notification body that the channel forwards to Claude. When
 // images are present, append `[image N: /path]` refs; if the text was empty,
 // use "(image)" so the body is never blank.
@@ -243,6 +258,30 @@ export class FeishuClient {
     const mid = res?.data?.message_id
     if (!mid) throw new Error('replyText: Feishu API returned no message_id')
     return mid
+  }
+
+  // Fetch a message's pre-rendered content via lark-cli mget. lark-cli flattens
+  // Feishu's format zoo (post variants, merge_forward, sticker, etc.) into a
+  // single human-readable string — saves us from maintaining a parser per
+  // msg_type. Caller handles image extraction separately.
+  fetchRenderedMessage(messageId: string): { content: string; msgType: string } {
+    let out: string
+    try {
+      out = execSync(
+        `lark-cli im +messages-mget --as bot --message-ids ${messageId} --format json`,
+        { encoding: 'utf8', timeout: 15000, stdio: ['pipe', 'pipe', 'pipe'] },
+      )
+    } catch (err) {
+      throw new Error(`fetchRenderedMessage: lark-cli failed: ${err}`)
+    }
+    let parsed: unknown
+    try { parsed = JSON.parse(out) } catch {
+      throw new Error('fetchRenderedMessage: lark-cli output is not JSON')
+    }
+    const msg = (parsed as { data?: { messages?: Array<{ content?: string; msg_type?: string }> } })
+      ?.data?.messages?.[0]
+    if (!msg) throw new Error('fetchRenderedMessage: message not found in response')
+    return { content: String(msg.content ?? ''), msgType: String(msg.msg_type ?? 'unknown') }
   }
 
   // Download an image via lark-cli and persist it under destDir with a proper

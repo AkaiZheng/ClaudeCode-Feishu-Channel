@@ -4,6 +4,7 @@ import {
   parsePost,
   safeName,
   extractImageKeys,
+  extractImageRefsFromRendered,
   detectImageExt,
   safeMessageId,
   buildNotificationContent,
@@ -229,6 +230,48 @@ describe('detectImageExt', () => {
       0x57, 0x41, 0x56, 0x45, // WAVE (not WEBP)
     ])
     expect(detectImageExt(buf)).toEqual({ ext: 'bin', mimeType: 'application/octet-stream' })
+  })
+})
+
+describe('extractImageRefsFromRendered', () => {
+  test('plain text → empty imageKeys, text unchanged', () => {
+    expect(extractImageRefsFromRendered('hello world'))
+      .toEqual({ text: 'hello world', imageKeys: [] })
+  })
+
+  test('single [Image: xxx] → extracts key, strips marker', () => {
+    expect(extractImageRefsFromRendered('[Image: img_abc]\n能看到截图吗'))
+      .toEqual({ text: '能看到截图吗', imageKeys: ['img_abc'] })
+  })
+
+  test('image-only content → empty text, key list', () => {
+    expect(extractImageRefsFromRendered('[Image: img_x]'))
+      .toEqual({ text: '', imageKeys: ['img_x'] })
+  })
+
+  test('multiple images + text → keeps text, order preserved', () => {
+    const rendered = '[Image: img_1]\nhello\n[Image: img_2]\nworld'
+    expect(extractImageRefsFromRendered(rendered))
+      .toEqual({ text: 'hello\nworld', imageKeys: ['img_1', 'img_2'] })
+  })
+
+  test('image key with hyphens (real lark-cli form)', () => {
+    const rendered = '[Image: img_v3_0210v_55ec5d63-2744-428a-be23-0620df5d0d3g]\nhi'
+    expect(extractImageRefsFromRendered(rendered))
+      .toEqual({ text: 'hi', imageKeys: ['img_v3_0210v_55ec5d63-2744-428a-be23-0620df5d0d3g'] })
+  })
+
+  test('merge_forward block is left intact (no markers inside)', () => {
+    const rendered = '<forwarded_messages>\n[2026-04-21T16:32:28+08:00] Zekai Zheng:\n    hi\n</forwarded_messages>'
+    const result = extractImageRefsFromRendered(rendered)
+    expect(result.imageKeys).toEqual([])
+    expect(result.text).toContain('<forwarded_messages>')
+    expect(result.text).toContain('Zekai Zheng')
+  })
+
+  test('trims leading/trailing newlines left by marker stripping', () => {
+    expect(extractImageRefsFromRendered('\n\n[Image: img_y]\n\n'))
+      .toEqual({ text: '', imageKeys: ['img_y'] })
   })
 })
 

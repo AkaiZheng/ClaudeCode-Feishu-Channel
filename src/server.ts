@@ -23,7 +23,15 @@ import {
   type Access,
   type InboundEvent,
 } from './access.ts'
-import { FeishuClient, chunk, parsePost, extractImageKeys, safeMessageId, buildNotificationContent } from './feishu.ts'
+import {
+  FeishuClient,
+  chunk,
+  parsePost,
+  extractImageKeys,
+  extractImageRefsFromRendered,
+  safeMessageId,
+  buildNotificationContent,
+} from './feishu.ts'
 import { INSTRUCTIONS } from './instructions.ts'
 
 const HOME = homedir()
@@ -315,14 +323,25 @@ async function onEvent(event: InboundEvent): Promise<void> {
     process.stderr.write(`feishu channel: typing indicator failed: ${err}\n`)
   }
 
-  // deliver
-  const content = parsePost(event.message.message_type, event.message.content)
   const chatType = event.message.chat_type === 'group' ? 'group' : 'p2p'
   const ts = new Date(Number(event.message.create_time)).toISOString()
 
-  // Download images if present, save to disk, reference by absolute path.
-  // Claude reads them with the Read tool — no base64 blob in the notification.
-  const imageKeys = extractImageKeys(event.message.message_type, event.message.content)
+  // Primary path: let lark-cli render the content (handles post variants,
+  // merge_forward, sticker, etc.). Fall back to local parsing if lark-cli is
+  // unreachable — degraded but still delivers something.
+  let content: string
+  let imageKeys: string[]
+  try {
+    const rendered = feishu.fetchRenderedMessage(event.message.message_id)
+    const refs = extractImageRefsFromRendered(rendered.content)
+    content = refs.text
+    imageKeys = refs.imageKeys
+  } catch (err) {
+    process.stderr.write(`feishu channel: mget failed, falling back to local parse: ${err}\n`)
+    content = parsePost(event.message.message_type, event.message.content)
+    imageKeys = extractImageKeys(event.message.message_type, event.message.content)
+  }
+
   const imagePaths: string[] = []
   const safeMsgId = safeMessageId(event.message.message_id)
   for (let i = 0; i < imageKeys.length; i++) {
