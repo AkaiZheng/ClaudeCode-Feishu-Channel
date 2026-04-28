@@ -159,7 +159,16 @@ function readMasterKey(home: string): Buffer | undefined {
       const b64 = raw.startsWith('go-keyring-base64:')
         ? raw.slice('go-keyring-base64:'.length)
         : raw
-      const key = Buffer.from(b64, 'base64')
+      let key = Buffer.from(b64, 'base64')
+      // go-keyring may double-encode: lark-cli base64-encodes the 32-byte key,
+      // then go-keyring base64-encodes that string for keychain storage.
+      // If first decode yields 44 bytes of valid base64 text, decode again.
+      if (key.length !== 32) {
+        try {
+          const inner = Buffer.from(key.toString('utf8'), 'base64')
+          if (inner.length === 32) key = inner
+        } catch {}
+      }
       if (key.length === 32) return key
     } catch {}
   }
