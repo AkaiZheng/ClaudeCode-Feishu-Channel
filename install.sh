@@ -49,6 +49,10 @@ ln -sfn "$INSTALL_DIR/skills/access" "${HOME}/.claude/skills/feishu-access"
 ln -sfn "$INSTALL_DIR/skills/configure" "${HOME}/.claude/skills/feishu-configure"
 echo "🔗 Skills linked to ~/.claude/skills/"
 
+# ─── Rewrite .mcp.json with absolute paths ─────────────
+# Claude Code spawns MCP subprocesses without the user's shell PATH.
+bun "$INSTALL_DIR/scripts/write-mcp-config.ts"
+
 # ─── Run interactive setup ────────────────────────────────────
 
 echo ""

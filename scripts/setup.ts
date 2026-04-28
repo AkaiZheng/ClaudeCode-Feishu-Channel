@@ -9,8 +9,9 @@
 import { execSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, symlinkSync, lstatSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join } from 'node:path'
+import { join, basename } from 'node:path'
 import { decryptLarkCliSecret } from '../src/config.ts'
+import { writeMcpConfig } from '../src/mcp-config.ts'
 
 const HOME = homedir()
 const STATE_DIR = join(HOME, '.claude', 'channels', 'feishu')
@@ -73,6 +74,31 @@ function linkSkill(source: string, name: string) {
 linkSkill(join(PROJECT_DIR, 'skills', 'access'), 'feishu-access')
 linkSkill(join(PROJECT_DIR, 'skills', 'configure'), 'feishu-configure')
 console.log(`🔗 Skills linked to ${SKILLS_DIR}/`)
+
+// ─── Rewrite .mcp.json with absolute paths ───────────────────
+// Claude Code spawns the MCP subprocess without the user's shell PATH,
+// so `bun` may not resolve. Also, no cwd means wrong working directory.
+
+function findBun(): string {
+  // 1) Current process (running under bun)
+  if (process.execPath && basename(process.execPath).startsWith('bun')) return process.execPath
+  // 2) which bun
+  const fromPath = run('which bun')
+  if (fromPath) return fromPath
+  // 3) Common install locations
+  const candidates = [
+    join(HOME, '.bun', 'bin', 'bun'),
+    '/usr/local/bin/bun',
+  ]
+  for (const c of candidates) {
+    if (existsSync(c)) return c
+  }
+  return 'bun' // fallback to bare name
+}
+
+const bunPath = findBun()
+writeMcpConfig({ bunPath, projectDir: PROJECT_DIR })
+console.log(`🔧 .mcp.json updated with absolute paths (bun: ${bunPath})`)
 
 // ─── App Config ───────────────────────────────────────────────
 

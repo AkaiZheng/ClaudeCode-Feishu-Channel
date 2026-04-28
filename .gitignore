@@ -6,3 +6,4 @@ bun.lock.backup
 /test/tmp-*
 .env
 .env.local
+.mcp.json
