@@ -10,6 +10,7 @@ import { execSync, spawn } from 'node:child_process'
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, symlinkSync, lstatSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
+import { decryptLarkCliSecret } from '../src/config.ts'
 
 const HOME = homedir()
 const STATE_DIR = join(HOME, '.claude', 'channels', 'feishu')
@@ -154,6 +155,17 @@ if (hasEnvAppId && hasEnvSecret) {
   let secret = secretMatch?.[1] || ''
 
   // lark-cli might show masked or keychain reference
+  if (!secret || secret === '***' || secret.includes('keychain')) {
+    // Try to decrypt from lark-cli's encrypted keychain
+    if (finalAppId) {
+      const decrypted = decryptLarkCliSecret(HOME, finalAppId)
+      if (decrypted) {
+        secret = decrypted
+        console.log('🔓 Decrypted App Secret from lark-cli keychain.')
+      }
+    }
+  }
+
   if (!secret || secret === '***' || secret.includes('keychain')) {
     console.log('\n⚠️  App Secret not available from lark-cli (stored in OS keychain).')
     console.log('   ACTION_REQUIRED: Please provide your App Secret.')

@@ -1,5 +1,7 @@
-import { readFileSync, chmodSync } from 'node:fs'
+import { readFileSync, chmodSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
+import { execSync } from 'node:child_process'
+import { createDecipheriv } from 'node:crypto'
 
 
 // Load KEY=VALUE lines into process.env. Missing file is a no-op.
@@ -101,4 +103,105 @@ export function importFromLarkCli(home: string): LarkCliImport {
 
 export function resolveDomain(brand: string | undefined): string {
   return brand === 'lark' ? 'https://open.larksuite.com' : 'https://open.feishu.cn'
+}
+
+// ---------------------------------------------------------------------------
+// lark-cli keychain decryption — extract app secret from lark-cli's encrypted
+// store without user interaction.
+//
+// lark-cli stores secrets as AES-256-GCM encrypted files:
+//   nonce(12 bytes) + ciphertext(N bytes) + tag(16 bytes)
+//
+// The 32-byte master key lives in different places per platform:
+//   Linux:  ~/.local/share/lark-cli/master.key  (plain file)
+//   macOS:  macOS Keychain, service="lark-cli"   (via `security` CLI)
+//   Windows: TODO — needs investigation
+//
+// Encrypted files (.enc) are stored alongside the master key:
+//   Linux:  ~/.local/share/lark-cli/
+//   macOS:  ~/Library/Application Support/lark-cli/
+// ---------------------------------------------------------------------------
+
+function getLarkCliKeychainDirs(home: string): string[] {
+  const dirs: string[] = []
+  switch (process.platform) {
+    case 'darwin':
+      dirs.push(join(home, 'Library', 'Application Support', 'lark-cli'))
+      break
+    case 'win32':
+      if (process.env.LOCALAPPDATA) dirs.push(join(process.env.LOCALAPPDATA, 'lark-cli'))
+      dirs.push(join(home, 'AppData', 'Local', 'lark-cli'))
+      break
+    default: // linux / freebsd / etc.
+      dirs.push(join(process.env.XDG_DATA_HOME || join(home, '.local', 'share'), 'lark-cli'))
+  }
+  return dirs
+}
+
+function readMasterKey(home: string): Buffer | undefined {
+  // 1) Try file-based master key (Linux, possibly Windows)
+  for (const dir of getLarkCliKeychainDirs(home)) {
+    const keyPath = join(dir, 'master.key')
+    try {
+      const key = readFileSync(keyPath)
+      if (key.length === 32) return key
+    } catch {}
+  }
+
+  // 2) macOS: read from system Keychain via `security` CLI
+  if (process.platform === 'darwin') {
+    try {
+      const raw = execSync(
+        'security find-generic-password -s "lark-cli" -w 2>/dev/null',
+        { encoding: 'utf8', timeout: 5000 },
+      ).trim()
+      // Format: "go-keyring-base64:<base64>" or plain base64
+      const b64 = raw.startsWith('go-keyring-base64:')
+        ? raw.slice('go-keyring-base64:'.length)
+        : raw
+      const key = Buffer.from(b64, 'base64')
+      if (key.length === 32) return key
+    } catch {}
+  }
+
+  return undefined
+}
+
+function decryptAesGcm(key: Buffer, data: Buffer): string | undefined {
+  // AES-256-GCM layout: nonce(12) + ciphertext(variable) + tag(16)
+  if (data.length < 12 + 16 + 1) return undefined
+  const nonce = data.subarray(0, 12)
+  const tag = data.subarray(data.length - 16)
+  const ciphertext = data.subarray(12, data.length - 16)
+  try {
+    const decipher = createDecipheriv('aes-256-gcm', key, nonce)
+    decipher.setAuthTag(tag)
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()])
+    return plaintext.toString('utf8')
+  } catch {
+    return undefined
+  }
+}
+
+/**
+ * Attempt to decrypt the app secret from lark-cli's encrypted keychain.
+ * Returns the plaintext secret or undefined if decryption isn't possible.
+ * This is a best-effort, zero-interaction operation.
+ */
+export function decryptLarkCliSecret(home: string, appId: string): string | undefined {
+  const masterKey = readMasterKey(home)
+  if (!masterKey) return undefined
+
+  // Find the encrypted secret file — filename pattern: appsecret_<appId>.enc
+  const encFilename = `appsecret_${appId}.enc`
+  for (const dir of getLarkCliKeychainDirs(home)) {
+    const encPath = join(dir, encFilename)
+    try {
+      const encData = readFileSync(encPath)
+      const secret = decryptAesGcm(masterKey, encData)
+      if (secret && secret.length > 0) return secret
+    } catch {}
+  }
+
+  return undefined
 }

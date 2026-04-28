@@ -10,6 +10,7 @@ import {
   resolveStateDir,
   resolveDomain,
   importFromLarkCli,
+  decryptLarkCliSecret,
 } from './config.ts'
 import {
   readAccessFile,
@@ -60,11 +61,24 @@ if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) {
     process.env.FEISHU_DOMAIN = resolveDomain(imported.brand)
   }
   if (imported.secretSource === 'keychain' && !process.env.FEISHU_APP_SECRET) {
-    process.stderr.write(
-      `feishu channel: imported ${imported.env.FEISHU_APP_ID ? 'appId' : ''} from lark-cli,\n` +
-      `  but appSecret is in your OS keychain and cannot be read programmatically.\n` +
-      `  Set FEISHU_APP_SECRET in ${ENV_FILE} (0o600) or run /feishu:configure set FEISHU_APP_SECRET=<secret>\n`,
-    )
+    // Try to decrypt from lark-cli's encrypted keychain store
+    const appId = imported.env.FEISHU_APP_ID || process.env.FEISHU_APP_ID
+    if (appId) {
+      const decrypted = decryptLarkCliSecret(HOME, appId)
+      if (decrypted) {
+        process.env.FEISHU_APP_SECRET = decrypted
+        process.stderr.write(
+          `feishu channel: decrypted appSecret from lark-cli keychain for ${appId}.\n`,
+        )
+      }
+    }
+    if (!process.env.FEISHU_APP_SECRET) {
+      process.stderr.write(
+        `feishu channel: imported ${imported.env.FEISHU_APP_ID ? 'appId' : ''} from lark-cli,\n` +
+        `  but appSecret is in your OS keychain and cannot be read programmatically.\n` +
+        `  Set FEISHU_APP_SECRET in ${ENV_FILE} (0o600) or run /feishu:configure set FEISHU_APP_SECRET=<secret>\n`,
+      )
+    }
   }
 }
 
