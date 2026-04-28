@@ -62,7 +62,7 @@ if (!process.env.FEISHU_APP_ID || !process.env.FEISHU_APP_SECRET) {
   }
   if (imported.secretSource === 'keychain' && !process.env.FEISHU_APP_SECRET) {
     // Try to decrypt from lark-cli's encrypted keychain store
-    const appId = imported.env.FEISHU_APP_ID || process.env.FEISHU_APP_ID
+    const appId = process.env.FEISHU_APP_ID || imported.env.FEISHU_APP_ID
     if (appId) {
       const decrypted = decryptLarkCliSecret(HOME, appId)
       if (decrypted) {

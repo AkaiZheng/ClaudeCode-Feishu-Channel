@@ -1,4 +1,4 @@
-import { readFileSync, chmodSync, existsSync } from 'node:fs'
+import { readFileSync, chmodSync } from 'node:fs'
 import { join } from 'node:path'
 import { execSync } from 'node:child_process'
 import { createDecipheriv } from 'node:crypto'
@@ -189,6 +189,7 @@ function decryptAesGcm(key: Buffer, data: Buffer): string | undefined {
  * This is a best-effort, zero-interaction operation.
  */
 export function decryptLarkCliSecret(home: string, appId: string): string | undefined {
+  if (!/^[A-Za-z0-9_-]+$/.test(appId)) return undefined
   const masterKey = readMasterKey(home)
   if (!masterKey) return undefined
 
