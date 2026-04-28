@@ -7,7 +7,7 @@
  * Usage: bun scripts/setup.ts
  */
 import { execSync, spawn } from 'node:child_process'
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from 'node:fs'
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, symlinkSync, lstatSync, unlinkSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
@@ -52,6 +52,26 @@ if (!hasNodeModules) {
   console.log('\n📦 Installing dependencies...')
   execSync('bun install', { cwd: PROJECT_DIR, stdio: 'inherit' })
 }
+
+// ─── Link skills into ~/.claude/skills/ ───────────────────────
+// Claude Code only scans ~/.claude/skills/, so /feishu:access and
+// /feishu:configure won't resolve unless we surface them there.
+
+const SKILLS_DIR = join(HOME, '.claude', 'skills')
+mkdirSync(SKILLS_DIR, { recursive: true })
+
+function linkSkill(source: string, name: string) {
+  const dest = join(SKILLS_DIR, name)
+  try {
+    lstatSync(dest)
+    unlinkSync(dest)
+  } catch {}
+  symlinkSync(source, dest, 'dir')
+}
+
+linkSkill(join(PROJECT_DIR, 'skills', 'access'), 'feishu-access')
+linkSkill(join(PROJECT_DIR, 'skills', 'configure'), 'feishu-configure')
+console.log(`🔗 Skills linked to ${SKILLS_DIR}/`)
 
 // ─── App Config ───────────────────────────────────────────────
 

@@ -40,6 +40,15 @@ fi
 echo "📦 Installing dependencies..."
 bun install --no-summary
 
+# ─── Link skills into ~/.claude/skills/ ───────────────────────
+# Claude Code only scans ~/.claude/skills/, so /feishu:access and
+# /feishu:configure won't resolve unless we surface them there.
+
+mkdir -p "${HOME}/.claude/skills"
+ln -sfn "$INSTALL_DIR/skills/access" "${HOME}/.claude/skills/feishu-access"
+ln -sfn "$INSTALL_DIR/skills/configure" "${HOME}/.claude/skills/feishu-configure"
+echo "🔗 Skills linked to ~/.claude/skills/"
+
 # ─── Run interactive setup ────────────────────────────────────
 
 echo ""
